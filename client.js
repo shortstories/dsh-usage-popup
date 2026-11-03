@@ -490,6 +490,17 @@ window.__ModuleLoader__.load({
 
           React.useEffect(() => {
             store.ensure();
+            // Usage moves while the panel sits open, but the browser page behind
+            // the Gemini card is expensive: re-read only when the user comes back.
+            const onVisible = () => {
+              if (document.visibilityState === 'visible') store.ensure();
+            };
+            window.addEventListener('focus', onVisible);
+            document.addEventListener('visibilitychange', onVisible);
+            return () => {
+              window.removeEventListener('focus', onVisible);
+              document.removeEventListener('visibilitychange', onVisible);
+            };
           }, []);
 
           const now = Date.now();

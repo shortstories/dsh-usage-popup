@@ -38,6 +38,7 @@ A page refresh is required after install or update: the boot manifest of the alr
 - The route is gated with `ctx.connection.requestRejection()`: without a valid DSH browser cookie it answers `401`, so a public deployment does not leak account names or balances.
 - `client.js` (browser module, `window.__ModuleLoader__`) registers a single slot entry on `settings.models.footer` and renders the panel with the shell's React. Copy is registered in the `usage-popup` locale namespace (`ko`, `en`) and falls back to `en`.
 - Session replay runs on the Host side over zstd logs, so the numbers mean the same thing for every provider.
+- Refresh policy: the panel reads once when it mounts, re-reads when the window regains focus or the tab becomes visible again (only if the last read is older than 15 s), and the header button forces `?fresh=1` through every cache. There is no background polling, because the Gemini card drives a real browser page.
 
 ## Options
 
