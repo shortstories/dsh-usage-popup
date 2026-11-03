@@ -2,7 +2,7 @@
   "name": "dsh-usage-popup",
   "version": "0.1.0",
   "private": true,
-  "description": "모델 설정 페이지에 Codex·Gemini·DeepSeek 사용량과 남은 한도를 보여 주는 패널",
+  "description": "DSH Web plugin: Codex, Gemini Web and DeepSeek remaining limits plus local token usage on the Settings → Models page",
   "type": "module",
   "main": "host.js",
   "exports": {
@@ -15,7 +15,9 @@
     "host.js",
     "client.js",
     "cordis.patch.yml",
-    "locale/*.json"
+    "locale/*.json",
+    "README.md",
+    "LICENSE"
   ],
   "dsh": {
     "bundle": {
@@ -28,5 +30,23 @@
         "@deepseek-ai/dsh-client-ui-settings-models"
       ]
     }
-  }
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/shortstories/dsh-usage-popup.git"
+  },
+  "homepage": "https://github.com/shortstories/dsh-usage-popup#readme",
+  "bugs": {
+    "url": "https://github.com/shortstories/dsh-usage-popup/issues"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "usage",
+    "quota",
+    "codex",
+    "gemini",
+    "deepseek"
+  ]
 }
