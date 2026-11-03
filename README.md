@@ -2,8 +2,6 @@
 
 A DSH Web plugin that shows the remaining provider limits plus this Harness's own usage, on the **Settings → Models** page.
 
-![panel](docs/panel.txt)
-
 One panel, three cards:
 
 | Card | Source of the limit | What it shows |
