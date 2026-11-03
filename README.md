@@ -7,7 +7,7 @@ One panel, three cards:
 | Card | Source of the limit | What it shows |
 | --- | --- | --- |
 | **Codex** | `https://chatgpt.com/backend-api/wham/usage` with the OAuth access token from the subscriptions store | remaining % of the 5-hour and weekly windows, reset countdown, plan, limit-reached badge, account |
-| **Gemini Web** | the local proxy's `/health` document | proxy status, open browser sessions, a note that Google exposes no quota API for the web subscription |
+| **Gemini Web** | the signed-in browser's own `https://gemini.google.com/usage` page, read through the local proxy's `/v1/usage` | daily and weekly limit meters, reset times, plan and account |
 | **DeepSeek API** | `https://api.deepseek.com/user/balance` with the configured API key | balance, topped-up / granted split, out-of-balance badge |
 
 Each card also carries **this Harness's own** request and token counts for today and the trailing week, replayed from `$DSH_HOME/sessions/**/session.*.jsonl.zstd` (`assistant/message` usage events), so provider quota and local consumption sit side by side.
@@ -50,6 +50,9 @@ A page refresh is required after install or update: the boot manifest of the alr
 | `deepseekBalanceUrl` | `https://api.deepseek.com/user/balance` | DeepSeek balance endpoint |
 | `deepseekKeyRef` | `DEEPSEEK_API_KEY` | credential reference resolved through the server; the key is read with the Host permission model, never shipped |
 | `geminiHealthUrl` | `http://127.0.0.1:18089/health` | Gemini Web proxy health document |
+| `geminiUsageUrl` | `http://127.0.0.1:18089/v1/usage` | usage page text read through the proxy |
+| `geminiTokenPath` | `$DSH_HOME/integrations/gemini-web/proxy.token` | bearer token for that loopback route |
+| `geminiTimeoutMs` | 30000 | the usage read drives a browser page, so it is slower than the JSON APIs |
 | `sessionsRoot` | `$DSH_HOME/sessions` | window for the local replay |
 | `lookbackMs` | 604800000 (7 days) | replay window |
 | `cacheTtlMs` | 20000 | summary cache |
@@ -59,7 +62,7 @@ A page refresh is required after install or update: the boot manifest of the alr
 
 - DSH with the Web profile (`dsh web`) and the `@deepseek-ai/dsh-client-ui-settings-models` package (the Models page).
 - `dsh-subscriptions` for the Codex card (optional: without it the card reports "no sign-in").
-- `gemini-web-proxy` on port 18089 for the Gemini card (optional).
+- `gemini-web-proxy` on port 18089 with `GET /v1/usage` for the Gemini card (optional). The card reads the plan's daily and weekly limits from the signed-in browser's usage page; a signed-out profile shows a sign-in hint instead.
 - A `DEEPSEEK_API_KEY` credential for the DeepSeek card (optional).
 
 Missing pieces degrade to a per-card error message; the rest of the panel keeps working.

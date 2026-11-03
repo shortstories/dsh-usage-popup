@@ -45,7 +45,14 @@ window.__ModuleLoader__.load({
       'gemini.offline': '연결 안 됨',
       'gemini.status': '프록시 상태',
       'gemini.sessions': '열린 브라우저 세션',
-      'gemini.noQuota': 'Google은 웹 구독 잔여량을 API로 제공하지 않습니다. 남은 양은 Google 계정 화면에서 확인됩니다.',
+      'gemini.plan': '플랜 {plan}',
+      'gemini.account': '계정',
+      'gemini.remaining': '남음 {percent}%',
+      'gemini.resetAt': '{when} 초기화',
+      'gemini.limit': '한도',
+      'gemini.updated': 'Google 집계 {text}',
+      'gemini.upsell': '{text}',
+      'gemini.raw': '한도 문구를 해석하지 못했습니다',
       'deepseek.name': 'DeepSeek API',
       'deepseek.available': '사용 가능',
       'deepseek.unavailable': '잔액 부족',
@@ -59,6 +66,9 @@ window.__ModuleLoader__.load({
       'error.no-key': 'DeepSeek API 키가 없습니다',
       'error.initializing': '프록시가 준비 중입니다',
       'error.proxy-error': '프록시에 오류가 있습니다',
+      'error.no-login': 'Google 로그인이 필요합니다. 구독 로그인 화면에서 다시 로그인해 주세요',
+      'error.no-token': 'Gemini 프록시 토큰을 읽지 못했습니다',
+      'error.no-limits': '사용량 한도를 찾지 못했습니다',
       'error.generic': '상태를 확인하지 못했습니다 ({code})',
     };
     const en = {
@@ -89,7 +99,14 @@ window.__ModuleLoader__.load({
       'gemini.offline': 'Disconnected',
       'gemini.status': 'Proxy status',
       'gemini.sessions': 'Open browser sessions',
-      'gemini.noQuota': 'Google exposes no quota API for the web subscription; the remainder is only visible in the Google account screen.',
+      'gemini.plan': '{plan} plan',
+      'gemini.account': 'Account',
+      'gemini.remaining': '{percent}% left',
+      'gemini.resetAt': 'resets {when}',
+      'gemini.limit': 'Limit',
+      'gemini.updated': 'Google counted {text}',
+      'gemini.upsell': '{text}',
+      'gemini.raw': 'Could not read the limit wording',
       'deepseek.name': 'DeepSeek API',
       'deepseek.available': 'Available',
       'deepseek.unavailable': 'Out of balance',
@@ -103,6 +120,9 @@ window.__ModuleLoader__.load({
       'error.no-key': 'No DeepSeek API key is configured',
       'error.initializing': 'The proxy is still starting',
       'error.proxy-error': 'The proxy reported an error',
+      'error.no-login': 'Google sign-in is required; sign in again from the subscription login screen',
+      'error.no-token': 'The Gemini proxy token could not be read',
+      'error.no-limits': 'The usage limits were not found',
       'error.generic': 'Could not read the status ({code})',
     };
     //#endregion
@@ -371,6 +391,30 @@ window.__ModuleLoader__.load({
           );
         }
 
+        function GeminiMeter({ window }) {
+          const used = Math.max(0, Math.min(100, Number(window.usedPercent)));
+          const remaining = Math.max(0, 100 - used);
+          const tone = used >= 90 ? 'bad' : used >= 70 ? 'warn' : 'ok';
+          return h(
+            React.Fragment,
+            null,
+            h(
+              'div',
+              { className: 'dsh-usage-meter' },
+              h('span', { className: 'dsh-usage-meter-label' }, window.label ?? t('gemini.limit')),
+              h('div', { className: 'dsh-usage-bar' }, h('span', {
+                className: 'dsh-usage-fill',
+                'data-tone': tone,
+                style: { width: `${used}%` },
+              })),
+              h('span', { className: 'dsh-usage-meter-value' }, t('gemini.remaining', { percent: remaining })),
+            ),
+            window.resetText === null || window.resetText === undefined
+              ? null
+              : h('div', { className: 'dsh-usage-meter-note' }, t('gemini.resetAt', { when: window.resetText })),
+          );
+        }
+
         function GeminiCard({ gemini }) {
           const ready = gemini.state === 'ok';
           const label = ready
@@ -378,20 +422,36 @@ window.__ModuleLoader__.load({
             : gemini.code === 'initializing'
               ? t('gemini.starting')
               : t('gemini.offline');
+          const badges = [
+            h('span', { className: 'dsh-usage-badge', key: 'state', 'data-tone': ready ? 'good' : 'bad' }, label),
+          ];
+          if (gemini.plan) {
+            badges.push(h('span', { className: 'dsh-usage-badge', key: 'plan' }, t('gemini.plan', { plan: gemini.plan })));
+          }
+          const body = [];
+          if (ready) {
+            for (const [index, window] of (gemini.windows ?? []).entries()) {
+              body.push(h(GeminiMeter, { window, key: `window-${index}` }));
+            }
+            if (gemini.updatedText) {
+              body.push(h('div', { className: 'dsh-usage-meta', key: 'updated' }, t('gemini.updated', { text: gemini.updatedText })));
+            }
+          } else {
+            body.push(h('div', { className: 'dsh-usage-meta', key: 'error' }, errorText(gemini.code ?? 'unreachable')));
+          }
           return h(
             'article',
             { className: 'dsh-usage-item' },
             h('div', { className: 'dsh-usage-item-head' },
               h('span', { className: 'dsh-usage-name' }, t('gemini.name')),
-              h('span', { className: 'dsh-usage-badge', 'data-tone': ready ? 'good' : 'bad' }, label)),
-            h('div', { className: 'dsh-usage-row' },
-              h('span', { className: 'dsh-usage-row-label' }, t('gemini.status')),
-              h('span', { className: 'dsh-usage-row-value' }, gemini.status ?? '—')),
-            h('div', { className: 'dsh-usage-row' },
-              h('span', { className: 'dsh-usage-row-label' }, t('gemini.sessions')),
-              h('span', { className: 'dsh-usage-row-value' }, String(gemini.sessions ?? 0))),
-            ready ? null : h('div', { className: 'dsh-usage-meta' }, errorText(gemini.code ?? 'unreachable')),
-            h('div', { className: 'dsh-usage-meta' }, t('gemini.noQuota')),
+              ...badges),
+            ...body,
+            gemini.account
+              ? h('div', { className: 'dsh-usage-row' },
+                h('span', { className: 'dsh-usage-row-label' }, t('gemini.account')),
+                h('span', { className: 'dsh-usage-row-value' }, gemini.account))
+              : null,
+            gemini.upsell ? h('div', { className: 'dsh-usage-meta' }, t('gemini.upsell', { text: gemini.upsell })) : null,
             localLine(gemini.local),
           );
         }

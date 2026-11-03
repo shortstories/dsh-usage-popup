@@ -5,8 +5,8 @@
  * credentials or the loopback network stays on this side:
  *  - Codex: the OAuth access token from the subscriptions store and its usage
  *    endpoint, which reports the two rolling quota windows.
- *  - Gemini Web: the local proxy's health document (Google exposes no quota API
- *    for the web subscription).
+ *  - Gemini Web: the proxy's health document for liveness and the signed-in
+ *    browser's own https://gemini.google.com/usage page for the two limits.
  *  - DeepSeek: the platform balance for the configured API key.
  *  - All three: token and request counts replayed from this Harness home's own
  *    session logs, so "usage" means the same thing for every provider.
@@ -51,7 +51,10 @@ function settingsOf(raw = {}) {
     codexUsageUrl: raw.codexUsageUrl || 'https://chatgpt.com/backend-api/wham/usage',
     deepseekBalanceUrl: raw.deepseekBalanceUrl || 'https://api.deepseek.com/user/balance',
     geminiHealthUrl: raw.geminiHealthUrl || 'http://127.0.0.1:18089/health',
+    geminiUsageUrl: raw.geminiUsageUrl || 'http://127.0.0.1:18089/v1/usage',
+    geminiTokenPath: raw.geminiTokenPath || join(home, 'integrations', 'gemini-web', 'proxy.token'),
     deepseekKeyRef: raw.deepseekKeyRef || 'DEEPSEEK_API_KEY',
+    geminiTimeoutMs: positive(raw.geminiTimeoutMs, 30_000),
     requestTimeoutMs: positive(raw.requestTimeoutMs, 9_000),
     cacheTtlMs: positive(raw.cacheTtlMs, DEFAULT_CACHE_TTL_MS),
     lookbackMs: positive(raw.lookbackMs, DEFAULT_LOOKBACK_MS),
@@ -129,18 +132,124 @@ async function collectCodex(settings) {
   }
 }
 
-async function collectGemini(settings) {
+/** Percent glyph lines on the usage page: "27% 사용됨", "1% used". */
+const PERCENT_LINE = /^(\d{1,3}(?:[.,]\d+)?)\s*%\s*(?:사용됨|사용|used)?$/i;
+/** Reset sentence: "오전 12:04에 초기화", "Resets at 12:04 AM". */
+const RESET_LINE = /(초기화|resets?\b|reset at)/i;
+const RESET_TAIL = /\s*(?:에\s*)?(?:초기화|resets?|reset at)\s*$/i;
+/** Plan badges printed above the limits. */
+const PLAN_LABELS = ['AI Ultra', 'AI Pro', 'AI Premium', 'Ultra', 'Pro', 'Plus', 'Business', 'Enterprise', 'Free'];
+/** Lines that are page chrome rather than a window label. */
+const LABEL_NOISE = new Set(['info', 'i']);
+
+/** Strip the "resets at" tail so the value reads as a wall-clock time. */
+function resetOf(line) {
+  return String(line ?? '').replace(RESET_TAIL, '').trim() || null;
+}
+
+/**
+ * Read the two limits out of https://gemini.google.com/usage text. The page is
+ * localized and its markup is Google's, so parse by text shape: a percent line
+ * borrows the nearest preceding label and the following reset sentence.
+ */
+function parseGeminiUsage(lines) {
+  const text = (Array.isArray(lines) ? lines : []).map((line) => String(line ?? '').trim()).filter(Boolean);
+  const windows = [];
+  for (const [index, line] of text.entries()) {
+    const match = PERCENT_LINE.exec(line);
+    if (!match) continue;
+    let label = null;
+    for (let back = index - 1; back >= 0 && back >= index - 4; back -= 1) {
+      const candidate = text[back];
+      if (LABEL_NOISE.has(candidate.toLowerCase())) continue;
+      // A reset sentence and another percent line sit between the label and
+      // its number, so neither can name this window.
+      if (RESET_LINE.test(candidate) || PERCENT_LINE.test(candidate)) continue;
+      label = candidate;
+      break;
+    }
+    // Weekly limits print the reset sentence above the number; daily ones below.
+    let resetText = null;
+    for (let ahead = index + 1; ahead < Math.min(text.length, index + 4); ahead += 1) {
+      if (RESET_LINE.test(text[ahead])) {
+        resetText = resetOf(text[ahead]);
+        break;
+      }
+    }
+    if (resetText === null) {
+      for (let back = index - 1; back >= 0 && back >= index - 4; back -= 1) {
+        if (RESET_LINE.test(text[back])) {
+          resetText = resetOf(text[back]);
+          break;
+        }
+      }
+    }
+    windows.push({
+      label,
+      usedPercent: Math.max(0, Math.min(100, Number(match[1].replace(',', '.')))),
+      resetText,
+    });
+  }
+
+  const planIndex = text.findIndex((line) => PLAN_LABELS.includes(line));
+  const plan = planIndex === -1 ? null : text[planIndex];
+  const account = planIndex > 0 && text[planIndex - 1].length <= 60 && !/[:%]/.test(text[planIndex - 1])
+    ? text[planIndex - 1]
+    : null;
+  const updatedText = text.find((line) => /(업데이트됨|updated)/i.test(line) && line.length <= 40) ?? null;
+  const upsell = text.find((line) => /^(AI Ultra|AI Pro).*(늘리기|upgrade)|^(AI Ultra|AI Pro).*(배로|5x)/i.test(line)) ?? null;
+
+  return {
+    plan,
+    account,
+    updatedText,
+    upsell,
+    windows,
+    raw: windows.length === 0 ? text.slice(0, 20) : undefined,
+  };
+}
+
+async function readProxyToken(settings) {
   try {
-    const body = await getJson(settings.geminiHealthUrl, {}, settings);
-    return {
-      state: body?.status === 'ready' ? 'ok' : 'error',
-      status: body?.status ?? 'unknown',
-      stage: body?.stage ?? null,
-      sessions: Number(body?.sessions) || 0,
-      ...(body?.status === 'ready' ? {} : { code: body?.error ? 'proxy-error' : 'initializing' }),
-    };
+    const token = (await readFile(settings.geminiTokenPath, 'utf8')).trim();
+    return token || null;
   } catch {
-    return { state: 'error', code: 'unreachable' };
+    return null;
+  }
+}
+
+async function collectGemini(settings, fresh = false) {
+  let health = null;
+  try {
+    health = await getJson(settings.geminiHealthUrl, {}, settings);
+  } catch {
+    health = null;
+  }
+  const proxy = {
+    status: health?.status ?? 'unknown',
+    stage: health?.stage ?? null,
+    sessions: Number(health?.sessions) || 0,
+  };
+  if (health === null) return { state: 'error', code: 'unreachable', ...proxy };
+  if (health.status !== 'ready') {
+    return { state: 'error', code: health.error ? 'proxy-error' : 'initializing', ...proxy };
+  }
+
+  // The usage page needs the proxy's bearer token; it is loopback-only.
+  const token = await readProxyToken(settings);
+  if (token === null) return { state: 'error', code: 'no-token', ...proxy };
+  try {
+    const body = await getJson(
+      fresh ? `${settings.geminiUsageUrl}?fresh=1` : settings.geminiUsageUrl,
+      { headers: { authorization: `Bearer ${token}`, accept: 'application/json' } },
+      { ...settings, requestTimeoutMs: settings.geminiTimeoutMs },
+    );
+    if (body?.signedIn !== true) return { state: 'error', code: 'no-login', ...proxy };
+    const parsed = parseGeminiUsage(body?.lines);
+    if (parsed.windows.length === 0) return { state: 'error', code: 'no-limits', ...proxy, ...parsed };
+    return { state: 'ok', ...proxy, ...parsed };
+  } catch (error) {
+    return { state: 'error', code: failureCode(error), ...proxy };
   }
 }
 
@@ -279,11 +388,11 @@ async function settle(promise) {
   }
 }
 
-async function buildSummary(ctx, settings) {
+async function buildSummary(ctx, settings, fresh = false) {
   const [local, codex, gemini, deepseek] = await Promise.all([
     settle(collectLocalUsage(settings)),
     settle(collectCodex(settings)),
-    settle(collectGemini(settings)),
+    settle(collectGemini(settings, fresh)),
     settle(collectDeepSeek(ctx, settings)),
   ]);
 
@@ -310,7 +419,7 @@ function createSummarySource(ctx, settings) {
       return Promise.resolve(cached.value);
     }
     if (pending === null) {
-      pending = buildSummary(ctx, settings).then(
+      pending = buildSummary(ctx, settings, fresh).then(
         (value) => {
           cached = { at: Date.now(), value };
           pending = null;
@@ -379,4 +488,4 @@ export function apply(ctx, config) {
 }
 
 /** Test seams. */
-export const internals = { settingsOf, startOfToday, collectLocalUsage, buildSummary, createHandler };
+export const internals = { settingsOf, startOfToday, collectLocalUsage, collectGemini, parseGeminiUsage, buildSummary, createHandler };
