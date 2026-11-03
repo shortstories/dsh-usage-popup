@@ -1,0 +1,32 @@
+{
+  "name": "dsh-usage-popup",
+  "version": "0.1.0",
+  "private": true,
+  "description": "모델 설정 페이지에 Codex·Gemini·DeepSeek 사용량과 남은 한도를 보여 주는 패널",
+  "type": "module",
+  "main": "host.js",
+  "exports": {
+    ".": "./host.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "host.js",
+    "client.js",
+    "cordis.patch.yml",
+    "locale/*.json"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-settings-models"
+      ]
+    }
+  }
+}

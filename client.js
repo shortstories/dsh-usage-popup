@@ -1,0 +1,488 @@
+/**
+ * Client half of the provider usage panel.
+ *
+ * The panel lives on the Models settings page (`settings.models.footer`), so the
+ * remaining Codex window, the Gemini proxy state and the DeepSeek balance sit
+ * where models are picked instead of adding another composer button. The browser
+ * asks the Host for one JSON summary; tokens and credentials never reach it.
+ */
+window.__ModuleLoader__.load({
+  id: 'dsh-usage-popup',
+  factory(require) {
+    const React = require('react');
+    const h = React.createElement;
+
+    const NS = 'usage-popup';
+    const ENDPOINT = '/usage-popup/summary';
+    const STALE_MS = 15000;
+
+    //#region texts
+    const ko = {
+      'panel.title': '사용량 · 남은 한도',
+      'panel.subtitle': 'Codex·Gemini·DeepSeek의 남은 한도와 이 Harness의 사용량',
+      'panel.loading': '불러오는 중…',
+      'panel.retry': '다시 시도',
+      'panel.refresh': '새로고침',
+      'panel.error': '사용량을 불러오지 못했습니다',
+      'panel.updated': '갱신 {when}',
+      'panel.now': '방금',
+      'panel.seconds': '{seconds}초 전',
+      'panel.minutes': '{minutes}분 전',
+      'panel.source': '한도는 공급자에서, 사용량은 이 Harness의 세션 기록에서 읽습니다.',
+      'common.today': '오늘 {requests}회 · {tokens} 토큰',
+      'common.week': '7일 {requests}회 · {tokens} 토큰',
+      'codex.name': 'Codex',
+      'codex.remaining': '남음 {percent}%',
+      'codex.reset': '{when} 후 초기화',
+      'codex.window.5h': '5시간',
+      'codex.window.week': '주간',
+      'codex.window.hours': '{hours}시간',
+      'codex.plan': '플랜 {plan}',
+      'codex.limitReached': '한도 소진',
+      'gemini.name': 'Gemini Web',
+      'gemini.connected': '연결됨',
+      'gemini.starting': '시작 중',
+      'gemini.offline': '연결 안 됨',
+      'gemini.status': '프록시 상태',
+      'gemini.sessions': '열린 브라우저 세션',
+      'gemini.noQuota': 'Google은 웹 구독 잔여량을 API로 제공하지 않습니다. 남은 양은 Google 계정 화면에서 확인됩니다.',
+      'deepseek.name': 'DeepSeek API',
+      'deepseek.available': '사용 가능',
+      'deepseek.unavailable': '잔액 부족',
+      'deepseek.balance': '잔액',
+      'deepseek.credit': '충전 {amount}',
+      'deepseek.granted': '보너스 {amount}',
+      'error.no-credential': 'Codex 로그인 정보가 없습니다',
+      'error.unauthorized': '로그인이 만료되었습니다. 다시 로그인해 주세요',
+      'error.rate-limited': '공급자가 요청을 제한하고 있습니다',
+      'error.unreachable': '공급자에 연결하지 못했습니다',
+      'error.no-key': 'DeepSeek API 키가 없습니다',
+      'error.initializing': '프록시가 준비 중입니다',
+      'error.proxy-error': '프록시에 오류가 있습니다',
+      'error.generic': '상태를 확인하지 못했습니다 ({code})',
+    };
+    const en = {
+      'panel.title': 'Usage and remaining limits',
+      'panel.subtitle': 'Remaining Codex, Gemini and DeepSeek limits plus this Harness’s own usage',
+      'panel.loading': 'Loading…',
+      'panel.retry': 'Retry',
+      'panel.refresh': 'Refresh',
+      'panel.error': 'Could not load usage',
+      'panel.updated': 'Updated {when}',
+      'panel.now': 'just now',
+      'panel.seconds': '{seconds}s ago',
+      'panel.minutes': '{minutes}m ago',
+      'panel.source': 'Limits come from each provider; usage is replayed from this Harness’s session logs.',
+      'common.today': 'Today {requests} req · {tokens} tokens',
+      'common.week': '7 days {requests} req · {tokens} tokens',
+      'codex.name': 'Codex',
+      'codex.remaining': '{percent}% left',
+      'codex.reset': 'resets in {when}',
+      'codex.window.5h': '5 hours',
+      'codex.window.week': 'Weekly',
+      'codex.window.hours': '{hours} hours',
+      'codex.plan': '{plan} plan',
+      'codex.limitReached': 'Limit reached',
+      'gemini.name': 'Gemini Web',
+      'gemini.connected': 'Connected',
+      'gemini.starting': 'Starting',
+      'gemini.offline': 'Disconnected',
+      'gemini.status': 'Proxy status',
+      'gemini.sessions': 'Open browser sessions',
+      'gemini.noQuota': 'Google exposes no quota API for the web subscription; the remainder is only visible in the Google account screen.',
+      'deepseek.name': 'DeepSeek API',
+      'deepseek.available': 'Available',
+      'deepseek.unavailable': 'Out of balance',
+      'deepseek.balance': 'Balance',
+      'deepseek.credit': '{amount} topped up',
+      'deepseek.granted': '{amount} granted',
+      'error.no-credential': 'No Codex sign-in was found',
+      'error.unauthorized': 'The sign-in expired; sign in again',
+      'error.rate-limited': 'The provider is rate limiting requests',
+      'error.unreachable': 'The provider could not be reached',
+      'error.no-key': 'No DeepSeek API key is configured',
+      'error.initializing': 'The proxy is still starting',
+      'error.proxy-error': 'The proxy reported an error',
+      'error.generic': 'Could not read the status ({code})',
+    };
+    //#endregion
+
+    const CSS = `
+.dsh-usage-block{display:flex;flex-direction:column;gap:10px;margin-top:24px}
+.dsh-usage-block-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}
+.dsh-usage-block-titles{display:flex;flex-direction:column;gap:2px;min-width:0}
+.dsh-usage-block-title{margin:0;font-size:14px;font-weight:600;line-height:20px;color:var(--dsw-alias-label-primary)}
+.dsh-usage-block-sub{margin:0;font-size:11px;line-height:16px;color:var(--dsw-alias-label-tertiary)}
+.dsh-usage-refresh{display:inline-flex;align-items:center;gap:5px;flex:none;height:26px;padding:0 10px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-sm);background:transparent;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px;cursor:pointer}
+.dsh-usage-refresh:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
+.dsh-usage-refresh:disabled{cursor:default;opacity:.55}
+.dsh-usage-refresh svg{width:13px;height:13px}
+.dsh-usage-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:10px}
+.dsh-usage-item{display:flex;flex-direction:column;gap:8px;min-width:0;padding:12px 14px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-lg);background:var(--dsw-alias-bg-layer-1)}
+.dsh-usage-item-head{display:flex;align-items:center;gap:6px;min-width:0}
+.dsh-usage-name{font-size:12px;font-weight:600;line-height:16px;white-space:nowrap;color:var(--dsw-alias-label-primary)}
+.dsh-usage-badge{padding:0 6px;border-radius:999px;background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-tertiary);font-size:10px;font-weight:600;line-height:16px;letter-spacing:.2px;white-space:nowrap}
+.dsh-usage-badge[data-tone=good]{color:var(--dsw-alias-state-success-primary)}
+.dsh-usage-badge[data-tone=bad]{color:var(--dsw-alias-state-error-primary)}
+.dsh-usage-meter{display:grid;grid-template-columns:56px 1fr auto;align-items:center;gap:8px;min-width:0}
+.dsh-usage-meter-label{font-size:11px;line-height:16px;color:var(--dsw-alias-label-secondary);white-space:nowrap}
+.dsh-usage-meter-value{font-size:11px;line-height:16px;color:var(--dsw-alias-label-primary);font-variant-numeric:tabular-nums;white-space:nowrap}
+.dsh-usage-bar{height:6px;border-radius:999px;background:var(--dsw-alias-interactive-bg-hover-solid);overflow:hidden}
+.dsh-usage-fill{display:block;height:100%;border-radius:999px;background:var(--dsw-alias-button-primary-fill)}
+.dsh-usage-fill[data-tone=warn]{background:var(--dsw-alias-state-success-primary)}
+.dsh-usage-fill[data-tone=bad]{background:var(--dsw-alias-state-error-primary)}
+.dsh-usage-row{display:flex;align-items:baseline;justify-content:space-between;gap:10px;min-width:0;font-size:11px;line-height:16px}
+.dsh-usage-row-label{color:var(--dsw-alias-label-secondary);white-space:nowrap}
+.dsh-usage-row-value{color:var(--dsw-alias-label-primary);text-align:right;font-variant-numeric:tabular-nums}
+.dsh-usage-meta{font-size:11px;line-height:16px;color:var(--dsw-alias-label-tertiary)}
+.dsh-usage-meter-note{font-size:10px;line-height:14px;color:var(--dsw-alias-label-tertiary)}
+.dsh-usage-foot{display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.dsh-usage-note{margin:0;font-size:10px;line-height:15px;color:var(--dsw-alias-label-tertiary)}
+.dsh-usage-state{display:flex;align-items:center;gap:8px;padding:18px 0;font-size:12px;line-height:18px;color:var(--dsw-alias-label-tertiary)}
+.dsh-usage-spinner{width:14px;height:14px;flex:none;border-radius:999px;border:2px solid var(--dsw-alias-border-l2);border-top-color:var(--dsw-alias-label-secondary);animation:dsh-usage-spin .8s linear infinite}
+@keyframes dsh-usage-spin{to{transform:rotate(360deg)}}
+`;
+
+    //#region formatting
+    const TOKEN_UNITS = [
+      [1e9, 'B'],
+      [1e6, 'M'],
+      [1e3, 'K'],
+    ];
+
+    function formatTokens(value) {
+      const n = Number(value);
+      if (!Number.isFinite(n)) return '—';
+      for (const [scale, suffix] of TOKEN_UNITS) {
+        if (n >= scale) return `${(n / scale).toFixed(n >= scale * 10 ? 0 : 1).replace(/\.0$/, '')}${suffix}`;
+      }
+      return String(Math.round(n));
+    }
+
+    /** Human duration for a quota reset countdown (ko/en agnostic units). */
+    function formatWhen(ms, t) {
+      if (!Number.isFinite(ms) || ms <= 0) return t('panel.now');
+      const minutes = Math.floor(ms / 60000);
+      const days = Math.floor(minutes / 1440);
+      const hours = Math.floor((minutes % 1440) / 60);
+      const rest = minutes % 60;
+      if (days > 0) return `${days}d ${hours}h`;
+      if (hours > 0) return `${hours}h ${rest}m`;
+      return `${Math.max(1, rest)}m`;
+    }
+
+    function formatAgo(ms, t) {
+      if (!Number.isFinite(ms) || ms < 5000) return t('panel.now');
+      const seconds = Math.floor(ms / 1000);
+      if (seconds < 60) return t('panel.seconds', { seconds });
+      return t('panel.minutes', { minutes: Math.floor(seconds / 60) });
+    }
+
+    function currencySymbol(currency) {
+      if (currency === 'CNY') return '¥';
+      if (currency === 'USD') return '$';
+      return currency ? `${currency} ` : '';
+    }
+
+    function windowLabel(seconds, t) {
+      if (!Number.isFinite(seconds) || seconds <= 0) return t('codex.window.week');
+      if (seconds >= 518400) return t('codex.window.week');
+      if (seconds === 18000) return t('codex.window.5h');
+      return t('codex.window.hours', { hours: Math.round(seconds / 3600) });
+    }
+    //#endregion
+
+    //#region store
+    function createStore() {
+      let snapshot = { loading: false, error: null, data: null, loadedAt: 0 };
+      let request = 0;
+      const listeners = new Set();
+      const publish = (patch) => {
+        snapshot = { ...snapshot, ...patch };
+        for (const listener of [...listeners]) {
+          try {
+            listener();
+          } catch (error) {
+            console.error('usage-popup: listener crashed', error);
+          }
+        }
+      };
+      const load = async (fresh) => {
+        const ticket = ++request;
+        publish({ loading: true, error: null });
+        try {
+          const response = await fetch(`${ENDPOINT}${fresh ? '?fresh=1' : ''}`, {
+            headers: { accept: 'application/json' },
+            cache: 'no-store',
+          });
+          if (!response.ok) throw new Error(`http ${response.status}`);
+          const data = await response.json();
+          if (ticket !== request) return;
+          publish({ loading: false, error: null, data, loadedAt: Date.now() });
+        } catch (error) {
+          if (ticket !== request) return;
+          publish({ loading: false, error: error instanceof Error ? error.message : 'failed' });
+        }
+      };
+      return {
+        get: () => snapshot,
+        subscribe(listener) {
+          listeners.add(listener);
+          return () => listeners.delete(listener);
+        },
+        ensure() {
+          const stale = snapshot.data === null || Date.now() - snapshot.loadedAt > STALE_MS;
+          if (!snapshot.loading && (stale || snapshot.error !== null)) load(false);
+        },
+        refresh() {
+          return load(true);
+        },
+      };
+    }
+    //#endregion
+
+    //#region icons
+    function RefreshIcon() {
+      return h(
+        'svg',
+        { viewBox: '0 0 16 16', fill: 'none', 'aria-hidden': true },
+        h('path', {
+          d: 'M13 8a5 5 0 1 1-1.7-3.8M13 2.6V5.6h-3',
+          stroke: 'currentColor',
+          strokeWidth: 1.3,
+          strokeLinecap: 'round',
+          strokeLinejoin: 'round',
+        }),
+      );
+    }
+    //#endregion
+
+    return {
+      inject: ['slots', 'locale'],
+      apply(ctx) {
+        const locale = ctx.get('locale');
+        const t = locale ? locale.bind(NS) : (key) => key;
+
+        if (locale) {
+          ctx.effect(() => locale.register(NS, 'ko', ko), 'usage-popup: ko dictionary');
+          ctx.effect(() => locale.register(NS, 'en', en), 'usage-popup: en dictionary');
+        }
+
+        ctx.effect(() => {
+          const tag = document.createElement('style');
+          tag.dataset.plugin = 'dsh-usage-popup';
+          tag.textContent = CSS;
+          document.head.appendChild(tag);
+          return () => {
+            tag.remove();
+          };
+        }, 'usage-popup: styles');
+
+        const store = createStore();
+
+        /** Re-render on store and locale changes. */
+        function useSnapshot() {
+          const [snapshot, setSnapshot] = React.useState(store.get);
+          const [, setRevision] = React.useState(0);
+          React.useEffect(() => store.subscribe(() => setSnapshot(store.get())), []);
+          React.useEffect(() => {
+            if (!locale) return undefined;
+            return locale.subscribe(() => setRevision((value) => value + 1));
+          }, []);
+          return snapshot;
+        }
+
+        function errorText(code) {
+          const key = `error.${code}`;
+          const text = t(key);
+          return text === key ? t('error.generic', { code }) : text;
+        }
+
+        function localLine(local) {
+          if (!local || !local.today || !local.week) return null;
+          return h(
+            'div',
+            { className: 'dsh-usage-foot' },
+            h('span', { className: 'dsh-usage-meta' }, t('common.today', {
+              requests: local.today.requests,
+              tokens: formatTokens(local.today.total),
+            })),
+            h('span', { className: 'dsh-usage-meta' }, t('common.week', {
+              requests: local.week.requests,
+              tokens: formatTokens(local.week.total),
+            })),
+          );
+        }
+
+        function WindowMeter({ window, now }) {
+          const used = Math.max(0, Math.min(100, Number(window.usedPercent)));
+          const remaining = Math.max(0, 100 - used);
+          const tone = used >= 90 ? 'bad' : used >= 70 ? 'warn' : 'ok';
+          const reset = Number.isFinite(window.resetAt)
+            ? window.resetAt * 1000
+            : Number.isFinite(window.resetAfterSeconds)
+              ? now + window.resetAfterSeconds * 1000
+              : null;
+          return h(
+            React.Fragment,
+            null,
+            h(
+              'div',
+              { className: 'dsh-usage-meter' },
+              h('span', { className: 'dsh-usage-meter-label' }, windowLabel(window.limitSeconds, t)),
+              h('div', { className: 'dsh-usage-bar' }, h('span', {
+                className: 'dsh-usage-fill',
+                'data-tone': tone,
+                style: { width: `${used}%` },
+              })),
+              h('span', { className: 'dsh-usage-meter-value' }, t('codex.remaining', { percent: remaining })),
+            ),
+            reset === null
+              ? null
+              : h('div', { className: 'dsh-usage-meter-note' }, t('codex.reset', { when: formatWhen(reset - now, t) })),
+          );
+        }
+
+        function CodexCard({ codex, now }) {
+          const badges = [];
+          if (codex.plan) {
+            badges.push(h('span', { className: 'dsh-usage-badge', key: 'plan' }, t('codex.plan', { plan: codex.plan })));
+          }
+          if (codex.limitReached) {
+            badges.push(h('span', { className: 'dsh-usage-badge', key: 'limit', 'data-tone': 'bad' }, t('codex.limitReached')));
+          }
+          const meters = [];
+          if (codex.state === 'ok') {
+            for (const [index, window] of (codex.windows ?? []).entries()) {
+              meters.push(h(WindowMeter, { window, now, key: `window-${index}` }));
+            }
+          } else {
+            meters.push(h('div', { className: 'dsh-usage-meta', key: 'error' }, errorText(codex.code)));
+          }
+          return h(
+            'article',
+            { className: 'dsh-usage-item' },
+            h('div', { className: 'dsh-usage-item-head' },
+              h('span', { className: 'dsh-usage-name' }, t('codex.name')),
+              ...badges),
+            ...meters,
+            codex.email ? h('div', { className: 'dsh-usage-meta' }, codex.email) : null,
+            localLine(codex.local),
+          );
+        }
+
+        function GeminiCard({ gemini }) {
+          const ready = gemini.state === 'ok';
+          const label = ready
+            ? t('gemini.connected')
+            : gemini.code === 'initializing'
+              ? t('gemini.starting')
+              : t('gemini.offline');
+          return h(
+            'article',
+            { className: 'dsh-usage-item' },
+            h('div', { className: 'dsh-usage-item-head' },
+              h('span', { className: 'dsh-usage-name' }, t('gemini.name')),
+              h('span', { className: 'dsh-usage-badge', 'data-tone': ready ? 'good' : 'bad' }, label)),
+            h('div', { className: 'dsh-usage-row' },
+              h('span', { className: 'dsh-usage-row-label' }, t('gemini.status')),
+              h('span', { className: 'dsh-usage-row-value' }, gemini.status ?? '—')),
+            h('div', { className: 'dsh-usage-row' },
+              h('span', { className: 'dsh-usage-row-label' }, t('gemini.sessions')),
+              h('span', { className: 'dsh-usage-row-value' }, String(gemini.sessions ?? 0))),
+            ready ? null : h('div', { className: 'dsh-usage-meta' }, errorText(gemini.code ?? 'unreachable')),
+            h('div', { className: 'dsh-usage-meta' }, t('gemini.noQuota')),
+            localLine(gemini.local),
+          );
+        }
+
+        function DeepSeekCard({ deepseek }) {
+          const ok = deepseek.state === 'ok';
+          const symbol = currencySymbol(deepseek.currency);
+          const split = [];
+          if (ok && deepseek.toppedUp !== null && deepseek.toppedUp !== undefined) {
+            split.push(t('deepseek.credit', { amount: `${symbol}${deepseek.toppedUp}` }));
+          }
+          if (ok && deepseek.granted !== null && deepseek.granted !== undefined) {
+            split.push(t('deepseek.granted', { amount: `${symbol}${deepseek.granted}` }));
+          }
+          return h(
+            'article',
+            { className: 'dsh-usage-item' },
+            h('div', { className: 'dsh-usage-item-head' },
+              h('span', { className: 'dsh-usage-name' }, t('deepseek.name')),
+              ok
+                ? h('span', { className: 'dsh-usage-badge', 'data-tone': deepseek.available ? 'good' : 'bad' },
+                  deepseek.available ? t('deepseek.available') : t('deepseek.unavailable'))
+                : null),
+            ok
+              ? h('div', { className: 'dsh-usage-row' },
+                h('span', { className: 'dsh-usage-row-label' }, t('deepseek.balance')),
+                h('span', { className: 'dsh-usage-row-value' }, `${symbol}${deepseek.total ?? '—'}`))
+              : h('div', { className: 'dsh-usage-meta' }, errorText(deepseek.code)),
+            split.length > 0 ? h('div', { className: 'dsh-usage-meta' }, split.join(' · ')) : null,
+            localLine(deepseek.local),
+          );
+        }
+
+        function UsagePanel() {
+          const snapshot = useSnapshot();
+
+          React.useEffect(() => {
+            store.ensure();
+          }, []);
+
+          const now = Date.now();
+          const data = snapshot.data;
+          let content;
+          if (data === null) {
+            if (snapshot.error !== null) {
+              content = h('div', { className: 'dsh-usage-state' },
+                h('span', null, `${t('panel.error')} (${snapshot.error})`),
+                h('button', { type: 'button', className: 'dsh-usage-refresh', onClick: () => store.refresh() }, t('panel.retry')));
+            } else {
+              content = h('div', { className: 'dsh-usage-state' },
+                h('span', { className: 'dsh-usage-spinner' }),
+                h('span', null, t('panel.loading')));
+            }
+          } else {
+            content = h('div', { className: 'dsh-usage-grid' },
+              h(CodexCard, { codex: data.codex ?? {}, now }),
+              h(GeminiCard, { gemini: data.gemini ?? {} }),
+              h(DeepSeekCard, { deepseek: data.deepseek ?? {} }));
+          }
+
+          return h(
+            'section',
+            { className: 'dsh-usage-block', 'aria-label': t('panel.title') },
+            h('header', { className: 'dsh-usage-block-head' },
+              h('div', { className: 'dsh-usage-block-titles' },
+                h('h3', { className: 'dsh-usage-block-title' }, t('panel.title')),
+                h('p', { className: 'dsh-usage-block-sub' },
+                  data === null
+                    ? t('panel.subtitle')
+                    : t('panel.updated', { when: formatAgo(now - snapshot.loadedAt, t) }))),
+              h('button', {
+                type: 'button',
+                className: 'dsh-usage-refresh',
+                title: t('panel.refresh'),
+                'aria-label': t('panel.refresh'),
+                disabled: snapshot.loading,
+                onClick: () => store.refresh(),
+              },
+              h(RefreshIcon),
+              h('span', null, t('panel.refresh')))),
+            content,
+            data === null ? null : h('p', { className: 'dsh-usage-note' }, t('panel.source')),
+          );
+        }
+
+        ctx.slots.inject('settings.models.footer', () => ctx.slots.register({
+          name: 'settings.models.footer',
+          id: 'usage-limits',
+          order: 40,
+        }, UsagePanel));
+      },
+    };
+  },
+});
