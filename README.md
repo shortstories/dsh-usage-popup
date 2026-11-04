@@ -17,7 +17,14 @@ The browser never sees tokens or API keys: it fetches one JSON summary from a Ho
 
 ## Sidebar bar
 
-The sidebar widget registers on `sidebar.footer.action`, so it sits at the foot of the sidebar beside Settings. It reads the open Session's model from the `modelSelection` projection and draws the **remaining** share of that provider's budget — the same figure the matching card shows, so the bar and the panel can never disagree. The bar turns amber at 30% left and red at 10%. DeepSeek reports a balance rather than a quota, so its bar stays empty and the label carries the amount.
+The sidebar widget registers on `sidebar.footer.action`, so it sits at the foot of the sidebar beside Settings. It reads the open Session's model from the `modelSelection` projection and draws the **remaining** share of that provider's budget — the same figure the matching card shows, so the bar and the panel can never disagree. The bar turns amber at 30% left and red at 10%.
+
+The widget fetches the summary itself instead of waiting for the panel: the panel lives on the Settings page, so on the sidebar nothing would ever trigger the first read.
+
+Two providers need a note:
+
+- **OpenRouter** has two ceilings — the key limit and the account credits behind it. The bar shows whichever is lower, because that is what stops the next request; when the credits bind, the card says so.
+- **DeepSeek** reports a balance rather than a quota, so its bar stays empty (idle tone, not red) and the label carries the amount.
 
 ## Install
 

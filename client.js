@@ -71,6 +71,7 @@ window.__ModuleLoader__.load({
       'openrouter.used': '사용 {amount}',
       'openrouter.reset': '{when} 후 초기화',
       'openrouter.credits': '계정 크레딧 {amount}',
+      'openrouter.creditBound': '크레딧 {amount}이 먼저 소진됩니다',
       'openrouter.noLimit': '한도 없음',
       'openrouter.freeTier': '무료 티어',
       'openrouter.weekly': '주간',
@@ -138,6 +139,7 @@ window.__ModuleLoader__.load({
       'openrouter.used': '{amount} used',
       'openrouter.reset': 'resets in {when}',
       'openrouter.credits': 'Account credits {amount}',
+      'openrouter.creditBound': 'Credits {amount} run out first',
       'openrouter.noLimit': 'No limit',
       'openrouter.freeTier': 'Free tier',
       'openrouter.weekly': 'Weekly',
@@ -542,6 +544,27 @@ window.__ModuleLoader__.load({
          * balance, OpenRouter as a key limit — so this normalises them all to
          * "how much is left", which is what the sidebar bar draws.
          */
+        /**
+         * The OpenRouter ceiling that actually binds, in dollars.
+         *
+         * A key limit and the account credits behind it are two separate ceilings,
+         * and whichever is lower is what stops the next request: a $10 key limit is
+         * worth nothing once the $5 of credits is spent. The card and the sidebar
+         * bar both read this, so they cannot disagree.
+         */
+        function openRouterBudget(card) {
+          const limit = Number(card.limit);
+          const keyRemaining = Number(card.remaining);
+          if (!Number.isFinite(limit) || !Number.isFinite(keyRemaining) || limit <= 0) return null;
+          const creditTotal = Number(card.credits?.total);
+          const creditUsed = Number(card.credits?.used);
+          const creditRemaining = Number.isFinite(creditTotal) && Number.isFinite(creditUsed)
+            ? Math.max(0, creditTotal - creditUsed)
+            : null;
+          const remaining = creditRemaining === null ? keyRemaining : Math.min(keyRemaining, creditRemaining);
+          return { limit, keyRemaining, creditRemaining, remaining };
+        }
+
         function remainingOf(provider, card) {
           if (!card || card.state !== 'ok') return null;
           if (provider === 'codex-oauth' || provider === 'gemini-web') {
@@ -556,13 +579,15 @@ window.__ModuleLoader__.load({
             // the figure. A negative balance means the account is in arrears.
             const balance = Number(card.total);
             if (!Number.isFinite(balance)) return null;
-            return { percent: 0, label: `${balance.toFixed(2)} ${card.currency ?? ''}`.trim() };
+            // `percent: null` keeps the bar in its idle tone: a balance has no
+            // ceiling to draw a share against, and a zero-width red bar would read
+            // as "exhausted" rather than "not a quota".
+            return { percent: null, label: `${balance.toFixed(2)} ${card.currency ?? ''}`.trim() };
           }
           if (provider === 'openrouter-preset') {
-            const limit = Number(card.limit);
-            const remaining = Number(card.remaining);
-            if (!Number.isFinite(limit) || !Number.isFinite(remaining) || limit <= 0) return null;
-            return { percent: (remaining / limit) * 100, label: money(remaining) };
+            const budget = openRouterBudget(card);
+            if (budget === null) return null;
+            return { percent: (budget.remaining / budget.limit) * 100, label: money(budget.remaining) };
           }
           return null;
         }
@@ -575,10 +600,9 @@ window.__ModuleLoader__.load({
           }
           const body = [];
           if (ok) {
-            const limit = Number(openrouter.limit);
-            const remaining = Number(openrouter.remaining);
-            if (Number.isFinite(limit) && limit > 0 && Number.isFinite(remaining)) {
-              const used = Math.max(0, Math.min(100, ((limit - remaining) / limit) * 100));
+            const budget = openRouterBudget(openrouter);
+            if (budget !== null) {
+              const used = Math.max(0, Math.min(100, ((budget.limit - budget.remaining) / budget.limit) * 100));
               const tone = used >= 90 ? 'bad' : used >= 70 ? 'warn' : 'ok';
               const resetAt = openrouter.resetsAt ? Date.parse(openrouter.resetsAt) : NaN;
               body.push(h(
@@ -591,11 +615,18 @@ window.__ModuleLoader__.load({
                   'data-tone': tone,
                   style: { width: `${used}%` },
                 })),
-                h('span', { className: 'dsh-usage-meter-value' }, t('openrouter.remaining', { amount: money(remaining) })),
+                h('span', { className: 'dsh-usage-meter-value' }, t('openrouter.remaining', { amount: money(budget.remaining) })),
               ));
               if (Number.isFinite(resetAt)) {
                 body.push(h('div', { className: 'dsh-usage-meter-note', key: 'reset' },
                   t('openrouter.reset', { when: formatWhen(resetAt - now, t) })));
+              }
+              // Name the binding ceiling when the credits, not the key limit, are
+              // what runs out first — otherwise the bar looks wrong against the
+              // key limit the provider reports.
+              if (budget.creditRemaining !== null && budget.creditRemaining < budget.keyRemaining) {
+                body.push(h('div', { className: 'dsh-usage-meter-note', key: 'binding' },
+                  t('openrouter.creditBound', { amount: money(budget.creditRemaining) })));
               }
             } else {
               body.push(h('div', { className: 'dsh-usage-meta', key: 'nolimit' }, t('openrouter.noLimit')));
@@ -723,12 +754,30 @@ window.__ModuleLoader__.load({
           const running = useSessions((state) => (sessionId === null ? false : state.byId[sessionId]?.running === true));
           const snapshot = useSnapshot();
 
+          // The panel is the only other reader of this store, and it lives on the
+          // Settings page: without this the sidebar would render before anything
+          // ever fetched, and sit on the empty state forever.
+          React.useEffect(() => {
+            store.ensure();
+            const onVisible = () => {
+              if (document.visibilityState === 'visible') store.ensure();
+            };
+            window.addEventListener('focus', onVisible);
+            document.addEventListener('visibilitychange', onVisible);
+            return () => {
+              window.removeEventListener('focus', onVisible);
+              document.removeEventListener('visibilitychange', onVisible);
+            };
+          }, []);
+
           if (!wide || sessionId === null) return null;
 
           const provider = model?.provider ?? null;
           const card = provider === null ? null : snapshot.data?.[TRACKED[provider]] ?? null;
           const budget = remainingOf(provider, card);
-          const percent = budget === null ? null : Math.max(0, Math.min(100, budget.percent));
+          const percent = typeof budget?.percent === 'number'
+            ? Math.max(0, Math.min(100, budget.percent))
+            : null;
           const tone = percent === null ? 'idle' : percent <= 10 ? 'bad' : percent <= 30 ? 'warn' : 'ok';
           const label = budget === null ? t('session.noBudget') : budget.label;
 
