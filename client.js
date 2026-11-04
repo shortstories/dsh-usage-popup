@@ -296,8 +296,16 @@ window.__ModuleLoader__.load({
           listeners.add(listener);
           return () => listeners.delete(listener);
         },
-        ensure() {
-          const stale = snapshot.data === null || Date.now() - snapshot.loadedAt > STALE_MS;
+        /**
+         * Read the summary if the held copy is older than `maxAgeMs`.
+         *
+         * The default is the focus/visibility staleness window. A caller that
+         * knows the figure just changed (a turn ended) passes 0 to re-read
+         * immediately; that still lands on the Host's own cache, so it costs a
+         * round trip rather than a provider call.
+         */
+        ensure(maxAgeMs = STALE_MS) {
+          const stale = snapshot.data === null || Date.now() - snapshot.loadedAt > maxAgeMs;
           if (!snapshot.loading && (stale || snapshot.error !== null)) load(false);
         },
         refresh() {
@@ -769,6 +777,17 @@ window.__ModuleLoader__.load({
               document.removeEventListener('visibilitychange', onVisible);
             };
           }, []);
+
+          // A turn is what spends the budget, so the moment one ends is the moment
+          // the figure is worth re-reading. This is an event, not a poll: a Session
+          // that sits idle costs nothing. The read is forced past the staleness
+          // window, but it still lands on the Host's 20 s cache, so a burst of
+          // short turns costs round trips rather than provider calls.
+          const wasRunning = React.useRef(false);
+          React.useEffect(() => {
+            if (wasRunning.current && !running) store.ensure(0);
+            wasRunning.current = running;
+          }, [running]);
 
           if (!wide || sessionId === null) return null;
 

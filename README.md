@@ -51,6 +51,7 @@ A page refresh is required after install or update: the boot manifest of the alr
 - `client.js` (browser module, `window.__ModuleLoader__`) registers a single slot entry on `settings.models.footer` and renders the panel with the shell's React. Copy is registered in the `usage-popup` locale namespace (`ko`, `en`) and falls back to `en`.
 - Session replay runs on the Host side over zstd logs, so the numbers mean the same thing for every provider.
 - Refresh policy: the panel reads once when it mounts, re-reads when the window regains focus or the tab becomes visible again (only if the last read is older than 15 s), and the header button forces `?fresh=1` through every cache. There is no background polling, because the Gemini card drives a real browser page.
+- The sidebar bar adds one trigger: it re-reads when the open Session's turn ends, since a turn is what spends the budget. That read bypasses the 15 s staleness window but still lands on the Host's 20 s cache, so a burst of short turns costs round trips, not provider calls. An idle Session costs nothing.
 
 ## Options
 
