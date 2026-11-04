@@ -38,6 +38,7 @@ const TRACKED = {
   'codex-oauth': 'codex',
   'gemini-web': 'gemini',
   'deepseek-official': 'deepseek',
+  'openrouter-preset': 'openrouter',
 };
 
 const unzip = promisify(zstdDecompress);
@@ -54,6 +55,9 @@ function settingsOf(raw = {}) {
     geminiUsageUrl: raw.geminiUsageUrl || 'http://127.0.0.1:18089/v1/usage',
     geminiTokenPath: raw.geminiTokenPath || join(home, 'integrations', 'gemini-web', 'proxy.token'),
     deepseekKeyRef: raw.deepseekKeyRef || 'DEEPSEEK_API_KEY',
+    openrouterKeyRef: raw.openrouterKeyRef || 'OPENROUTER_PRESET_API_KEY',
+    openrouterKeyUrl: raw.openrouterKeyUrl || 'https://openrouter.ai/api/v1/key',
+    openrouterCreditsUrl: raw.openrouterCreditsUrl || 'https://openrouter.ai/api/v1/credits',
     geminiTimeoutMs: positive(raw.geminiTimeoutMs, 30_000),
     requestTimeoutMs: positive(raw.requestTimeoutMs, 9_000),
     cacheTtlMs: positive(raw.cacheTtlMs, DEFAULT_CACHE_TTL_MS),
@@ -282,6 +286,56 @@ async function collectDeepSeek(ctx, settings) {
   }
 }
 
+/**
+ * OpenRouter reports the key's own budget on every call, so the limit is read
+ * from the response rather than configured: a key can be re-capped or reset
+ * between two refreshes and the card must follow it.
+ */
+async function collectOpenRouter(ctx, settings) {
+  let key;
+  try {
+    key = (await ctx.get('credentials')?.resolve?.(settings.openrouterKeyRef))?.value;
+  } catch {
+    key = undefined;
+  }
+  if (!key) return { state: 'error', code: 'no-key' };
+  const headers = { authorization: `Bearer ${key}`, accept: 'application/json' };
+  try {
+    const body = await getJson(settings.openrouterKeyUrl, { headers }, settings);
+    const data = body?.data ?? {};
+    const budget = Array.isArray(data.budgets) ? data.budgets[0] : null;
+    const number = (value) => (typeof value === 'number' && Number.isFinite(value) ? value : null);
+    const limit = number(data.limit) ?? number(budget?.limit_usd);
+    const remaining = number(data.limit_remaining) ?? number(budget?.remaining_usd);
+    let credits = null;
+    try {
+      const creditBody = await getJson(settings.openrouterCreditsUrl, { headers }, settings);
+      credits = {
+        total: number(creditBody?.data?.total_credits),
+        used: number(creditBody?.data?.total_usage),
+      };
+    } catch {
+      // Account credits are a secondary figure; a failure here must not hide
+      // the key budget the card is really about.
+      credits = null;
+    }
+    return {
+      state: 'ok',
+      limit,
+      remaining,
+      resetsAt: budget?.resets_at ?? null,
+      limitReset: data.limit_reset ?? budget?.reset_interval ?? null,
+      usage: number(data.usage),
+      usageDaily: number(data.usage_daily),
+      usageWeekly: number(data.usage_weekly),
+      isFreeTier: data.is_free_tier === true,
+      credits,
+    };
+  } catch (error) {
+    return { state: 'error', code: failureCode(error) };
+  }
+}
+
 async function listSessionLogs(root, since) {
   const found = [];
   const walk = async (dir, depth) => {
@@ -389,11 +443,12 @@ async function settle(promise) {
 }
 
 async function buildSummary(ctx, settings, fresh = false) {
-  const [local, codex, gemini, deepseek] = await Promise.all([
+  const [local, codex, gemini, deepseek, openrouter] = await Promise.all([
     settle(collectLocalUsage(settings)),
     settle(collectCodex(settings)),
     settle(collectGemini(settings, fresh)),
     settle(collectDeepSeek(ctx, settings)),
+    settle(collectOpenRouter(ctx, settings)),
   ]);
 
   const replay = local.ok ? local.value.byCard : null;
@@ -408,6 +463,7 @@ async function buildSummary(ctx, settings, fresh = false) {
     codex: attach('codex', codex),
     gemini: attach('gemini', gemini),
     deepseek: attach('deepseek', deepseek),
+    openrouter: attach('openrouter', openrouter),
   };
 }
 
@@ -488,4 +544,13 @@ export function apply(ctx, config) {
 }
 
 /** Test seams. */
-export const internals = { settingsOf, startOfToday, collectLocalUsage, collectGemini, parseGeminiUsage, buildSummary, createHandler };
+export const internals = {
+  settingsOf,
+  startOfToday,
+  collectLocalUsage,
+  collectGemini,
+  collectOpenRouter,
+  parseGeminiUsage,
+  buildSummary,
+  createHandler,
+};

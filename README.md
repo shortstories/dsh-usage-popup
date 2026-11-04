@@ -1,18 +1,23 @@
 # dsh-usage-popup
 
-A DSH Web plugin that shows the remaining provider limits plus this Harness's own usage, on the **Settings → Models** page.
+A DSH Web plugin that shows the remaining provider limits plus this Harness's own usage, on the **Settings → Models** page, and a one-line remaining-budget bar in the left sidebar for the Session you have open.
 
-One panel, three cards:
+One panel, four cards:
 
 | Card | Source of the limit | What it shows |
 | --- | --- | --- |
 | **Codex** | `https://chatgpt.com/backend-api/wham/usage` with the OAuth access token from the subscriptions store | remaining % of the 5-hour and weekly windows, reset countdown, plan, limit-reached badge, account |
 | **Gemini Web** | the signed-in browser's own `https://gemini.google.com/usage` page, read through the local proxy's `/v1/usage` | daily and weekly limit meters, reset times, plan and account |
 | **DeepSeek API** | `https://api.deepseek.com/user/balance` with the configured API key | balance, topped-up / granted split, out-of-balance badge |
+| **OpenRouter** | `https://openrouter.ai/api/v1/key` with the configured key | remaining key limit, reset countdown, spend today / this week, account credits, free-tier badge |
 
 Each card also carries **this Harness's own** request and token counts for today and the trailing week, replayed from `$DSH_HOME/sessions/**/session.*.jsonl.zstd` (`assistant/message` usage events), so provider quota and local consumption sit side by side.
 
 The browser never sees tokens or API keys: it fetches one JSON summary from a Host route.
+
+## Sidebar bar
+
+The sidebar widget registers on `sidebar.footer.action`, so it sits at the foot of the sidebar beside Settings. It reads the open Session's model from the `modelSelection` projection and draws the **remaining** share of that provider's budget — the same figure the matching card shows, so the bar and the panel can never disagree. The bar turns amber at 30% left and red at 10%. DeepSeek reports a balance rather than a quota, so its bar stays empty and the label carries the amount.
 
 ## Install
 
@@ -50,6 +55,9 @@ A page refresh is required after install or update: the boot manifest of the alr
 | `codexUsageUrl` | `https://chatgpt.com/backend-api/wham/usage` | Codex quota endpoint |
 | `deepseekBalanceUrl` | `https://api.deepseek.com/user/balance` | DeepSeek balance endpoint |
 | `deepseekKeyRef` | `DEEPSEEK_API_KEY` | credential reference resolved through the server; the key is read with the Host permission model, never shipped |
+| `openrouterKeyRef` | `OPENROUTER_PRESET_API_KEY` | credential reference for the OpenRouter key, resolved through the server like `deepseekKeyRef` |
+| `openrouterKeyUrl` | `https://openrouter.ai/api/v1/key` | key limit endpoint; the limit is read on every fetch, never cached in config |
+| `openrouterCreditsUrl` | `https://openrouter.ai/api/v1/credits` | account credits endpoint, read best-effort alongside the key limit |
 | `geminiHealthUrl` | `http://127.0.0.1:18089/health` | Gemini Web proxy health document |
 | `geminiUsageUrl` | `http://127.0.0.1:18089/v1/usage` | usage page text read through the proxy |
 | `geminiTokenPath` | `$DSH_HOME/integrations/gemini-web/proxy.token` | bearer token for that loopback route |

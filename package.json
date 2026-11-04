@@ -1,6 +1,6 @@
 {
   "name": "dsh-usage-popup",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "DSH Web plugin: Codex, Gemini Web and DeepSeek remaining limits plus local token usage on the Settings → Models page",
   "type": "module",
