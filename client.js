@@ -92,6 +92,7 @@ window.__ModuleLoader__.load({
       'opengateway.monthly': '이번 달',
       'session.model': '모델',
       'session.remaining': '남은 한도',
+      'session.spent': '오늘 지출',
       'session.noBudget': '한도 정보 없음',
       'session.none': '세션 없음',
       'error.no-credential': 'Codex 로그인 정보가 없습니다',
@@ -173,6 +174,7 @@ window.__ModuleLoader__.load({
       'opengateway.monthly': 'This month',
       'session.model': 'Model',
       'session.remaining': 'remaining',
+      'session.spent': 'spent today',
       'session.noBudget': 'no budget data',
       'session.none': 'No session',
       'error.no-credential': 'No Codex sign-in was found',
@@ -636,7 +638,9 @@ window.__ModuleLoader__.load({
               return { percent: (remaining / amount) * 100, label: spendMoney(remaining) };
             }
             if (!Number.isFinite(spent)) return null;
-            return { percent: null, label: spendMoney(spent) };
+            // Nothing to draw a share against, and the label is spend rather than
+            // a remainder, so `kind` keeps the tooltip from calling it "remaining".
+            return { percent: null, kind: 'spend', label: spendMoney(spent) };
           }
           return null;
         }
@@ -981,7 +985,9 @@ window.__ModuleLoader__.load({
             'div',
             {
               className: 'dsh-usage-side',
-              title: budget === null ? label : `${label} · ${t('session.remaining')}`,
+              title: budget === null
+                ? label
+                : `${label} · ${budget.kind === 'spend' ? t('session.spent') : t('session.remaining')}`,
             },
             h('div', { className: 'dsh-usage-side-head' },
               h('span', { className: 'dsh-usage-side-dot', 'data-tone': running ? 'live' : 'idle' }),

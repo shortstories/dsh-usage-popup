@@ -26,7 +26,7 @@ Three providers need a note:
 
 - **OpenRouter** has two ceilings — the key limit and the account credits behind it. The bar shows whichever is lower, because that is what stops the next request; when the credits bind, the card says so.
 - **DeepSeek** reports a balance rather than a quota, so its bar stays empty (idle tone, not red) and the label carries the amount.
-- **OpenGateway** publishes no balance or quota endpoint to an inference key (its console reads team quota through a Clerk-authenticated control plane), so without a budget the bar stays empty and the label carries today's spend. Set `opengatewayBudget` and the bar becomes a real remaining share of that budget.
+- **OpenGateway** publishes no balance or quota endpoint to an inference key (its console reads team quota through a Clerk-authenticated control plane), so without a budget the bar stays empty and the label carries today's spend, tooltip included. Set `opengatewayBudget` and the bar becomes a real remaining share of that budget.
 
 ## Install
 
