@@ -35,6 +35,14 @@ const MONTH_LOOKBACK_MS = 31 * 24 * 60 * 60 * 1000;
 /** Fixed offset of Asia/Seoul, the account's wall clock; no DST there. */
 const SEOUL_OFFSET_MS = 9 * 60 * 60 * 1000;
 const DAY_MS = 24 * 60 * 60 * 1000;
+/**
+ * OpenGateway's UltraFast models bill uncached input at twice the listed price
+ * once a request carries more than 256K total input tokens ("Long-context
+ * pricing" in https://opengateway.ai/docs/gateway/ultrafast). Cached input and
+ * output are not surcharged, and the public catalogue exposes no band price, so
+ * the surcharge is applied here as a multiplier.
+ */
+const LONG_CONTEXT_TOKENS = 256_000;
 
 /**
  * Provider registry keys → the popup card each one feeds. Gemini is served by
@@ -404,7 +412,9 @@ async function collectOpenGatewayPricing(settings) {
  *
  * DSH's `inputTokens` already excludes cached input (total = input + cacheRead
  * + output), so the three counters map one-to-one onto the three price columns
- * rather than overlapping.
+ * rather than overlapping. `bandInput` holds the uncached input of requests that
+ * crossed the long-context threshold; billing those tokens a second time is the
+ * same as doubling their price.
  */
 function bucketCost(bucket, price) {
   if (!bucket) return null;
@@ -413,7 +423,7 @@ function bucketCost(bucket, price) {
   for (const [model, counts] of Object.entries(bucket.byModel)) {
     const rates = price?.[model];
     if (!rates) continue;
-    usd += counts.input * rates.prompt
+    usd += (counts.input + (counts.bandInput ?? 0)) * rates.prompt
       + counts.output * rates.completion
       + counts.cache * (rates.cacheRead ?? 0);
     priced = true;
@@ -513,17 +523,20 @@ async function collectLocalUsage(settings) {
       const cache = Number(usage.cacheReadTokens) || 0;
       const total = Number(usage.totalTokens) || input + output + cache;
       const model = typeof source?.model === 'string' ? source.model : 'unknown';
+      // Uncached input is what a long-context request re-bills at double rate.
+      const bandInput = input + cache > LONG_CONTEXT_TOKENS ? input : 0;
       const add = (target) => {
         target.requests += 1;
         target.input += input;
         target.output += output;
         target.cache += cache;
         target.total += total;
-        const entry = (target.byModel[model] ??= { requests: 0, input: 0, output: 0, cache: 0 });
+        const entry = (target.byModel[model] ??= { requests: 0, input: 0, output: 0, cache: 0, bandInput: 0 });
         entry.requests += 1;
         entry.input += input;
         entry.output += output;
         entry.cache += cache;
+        entry.bandInput += bandInput;
       };
       add(bucket.week);
       if (time >= todayStart) add(bucket.today);

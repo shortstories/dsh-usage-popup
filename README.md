@@ -84,7 +84,13 @@ A page refresh is required after install or update: the boot manifest of the alr
 
 OpenGateway's console shows a remaining quota, but that number is behind a separate control plane: every route on it answers `401 Authentication required` to an inference key, because it expects a Clerk session token. The data plane has no balance, credit or usage endpoint either — `/v1/key`, `/v1/credits`, `/v1/usage` and their neighbours all `404`. The only quota signal an API client ever sees is the `X-OG-Budget-Warn` response header near a limit, and a `429 budget_exceeded` when one is hit.
 
+The published docs say the same thing rather than leaving it to inference: the API Reference lists only data-plane endpoints (chat, responses, messages, embeddings, images, decisions, models), `GET /v1/models` is documented as public, and balance lives on Billing as a **team** balance with a Low Balance Threshold alert and team plus per-key limits on the console's Quota page. None of that is exposed to an API key.
+
 So the card does the honest thing instead: it replays this home's own token counts and prices them against the catalogue, which is public. That gives money spent, not money left. A remaining figure appears only once you tell it what the budget is.
+
+### Long-context band
+
+UltraFast models bill uncached input at **twice** the listed input price once a request carries more than 256K total input tokens; cached input and output are not surcharged. The public catalogue carries no band price, so the replay applies the multiplier itself: uncached input from requests past the threshold is billed a second time (`LONG_CONTEXT_TOKENS` in `host.js`, documented as 256K). Requests below the threshold, cached tokens and output are untouched.
 
 ## Requirements
 
