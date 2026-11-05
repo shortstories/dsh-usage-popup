@@ -10,7 +10,7 @@ One panel, five cards:
 | **Gemini Web** | the signed-in browser's own `https://gemini.google.com/usage` page, read through the local proxy's `/v1/usage` | daily and weekly limit meters, reset times, plan and account |
 | **DeepSeek API** | `https://api.deepseek.com/user/balance` with the configured API key | balance, topped-up / granted split, out-of-balance badge |
 | **OpenRouter** | `https://openrouter.ai/api/v1/key` with the configured key | remaining key limit, reset countdown, spend today / this week, account credits, free-tier badge |
-| **OpenGateway** | `https://apis.opengateway.ai/v1/models` (public price list) × this home's own token counts | spend today / this week / this month per used model, the current discount window, and a remaining figure only against a configured budget |
+| **OpenGateway** | `https://apis.opengateway.ai/v1/models` (public price list) plus `https://opengateway.ai/api/model-prices` (long-context bands and the hourly schedule) × this home's own token counts | spend today / this week / this month per used model, the current discount window, the hourly tariff strip, the long-context band, and a remaining figure only against a configured budget |
 
 Each card also carries **this Harness's own** request and token counts for today and the trailing week, replayed from `$DSH_HOME/sessions/**/session.*.jsonl.zstd` (`assistant/message` usage events), so provider quota and local consumption sit side by side.
 
@@ -69,6 +69,8 @@ A page refresh is required after install or update: the boot manifest of the alr
 | `openrouterKeyUrl` | `https://openrouter.ai/api/v1/key` | key limit endpoint; the limit is read on every fetch, never cached in config |
 | `openrouterCreditsUrl` | `https://openrouter.ai/api/v1/credits` | account credits endpoint, read best-effort alongside the key limit |
 | `opengatewayModelsUrl` | `https://apis.opengateway.ai/v1/models` | public model catalogue; its per-token prices are what turn local token counts into money. No key is sent |
+| `opengatewayPricesUrl` | `https://opengateway.ai/api/model-prices` | the price table behind the console and the promo page: it carries the per-model long-context band and the forward schedule. A megabyte, cached for `opengatewayPricesTtlMs` |
+| `opengatewayPricesTtlMs` | 1800000 (30 minutes) | how long that table is reused. Mandatory-ish: the server sends it uncompressed and `no-store` |
 | `opengatewayBudget` | unset | a budget in dollars to measure spend against. Unset means the card reports spend only, because OpenGateway has no balance to read |
 | `opengatewayBudgetPeriod` | `monthly` | which window that budget covers: `daily`, `weekly` or `monthly`. A monthly budget widens the replay to 31 days |
 | `geminiHealthUrl` | `http://127.0.0.1:18089/health` | Gemini Web proxy health document |
@@ -90,11 +92,21 @@ So the card does the honest thing instead: it replays this home's own token coun
 
 ### Long-context band
 
-UltraFast models bill uncached input at **twice** the listed input price once a request carries more than 256K total input tokens; cached input and output are not surcharged. The public catalogue carries no band price, so the replay applies the multiplier itself: uncached input from requests past the threshold is billed a second time (`LONG_CONTEXT_TOKENS` in `host.js`, documented as 256K). Requests below the threshold, cached tokens and output are untouched.
+A request that carries more than its model's threshold of **total input** tokens (cached input included) is billed from that model's band price, and the band price replaces the running price for the **whole** request — input, cached input and output alike. The threshold and the band rates are per model: the table publishes 100K, 200K, 256K, 272K and 512K thresholds across the catalogue, and the multiplier is not a constant (2× for the Azure models, 3× for `qwen3.7-plus`, 5× for `qwen-flash`).
+
+Only the price table publishes that band, and it publishes it twice — once at list price and again inside the running window at the price actually charged. The card uses the running one, which for the two models this home uses means `256K` and about 2× the discounted rate. The replay counts each request into every band it crosses (`BAND_THRESHOLDS` in `host.js`, matching the thresholds above) and `bucketCost` lifts those tokens out of the running rate into the model's own band rate, so a request below the threshold is unaffected and a request above it is priced entirely at the band.
 
 ### Scheduled prices
 
-UltraFast prices are not fixed: the catalogue publishes a moving discount window (`discount_percent` with `until`) and the next slot after it (`next`), and the docs describe them as time-based prices that appear as a `−N% NOW` badge plus a next-change line. Two models are on a schedule today — `deepseek/deepseek-v4.1-flash-ultrafast` and `z-ai/glm-5.3-flash-ultrafast` — and both change at fixed hours, so the same tokens can cost more than twice as much a few hours later. The card therefore shows the rate now, the countdown to the change, and the **next** rate with the hour it starts; models on a static price (`source: LIST` or `MODEL_PERCENT`) simply have no countdown or next line.
+UltraFast prices are not fixed: the catalogue publishes a moving discount window (`discount_percent` with `until`) and the next slot after it (`next`), and the price table publishes the full forward schedule as `pricing.timeline` — an ordered list of windows, each carrying only an `until`, so a window ends where its successor begins. That list is what the promo page renders, and the card prints it as an hourly strip:
+
+```
+시간별 10:00 ↑$0.210 · 13:00 ↓$0.150 · 15:00 ↑$0.210 · 19:00 ↓$0.150
+```
+
+Each entry is a price change with a direction arrow measured against the window before it, up to four entries ahead. Models on a static price (`source: LIST` or `MODEL_PERCENT`) have no timeline and fall back to the catalogue's single `next` slot line. Two models are on a schedule today — `deepseek/deepseek-v4.1-flash-ultrafast` and `z-ai/glm-5.3-flash-ultrafast`.
+
+That schedule, and the band rates, come from `https://opengateway.ai/api/model-prices`, the table the console and the promo page read. It is a megabyte of JSON that the server neither compresses nor caches, so it sits behind its own module-level cache (`opengatewayPricesTtlMs`, 30 minutes) that is separate from the summary's 20-second cache: the prices move at the top of an hour, not on every fetch. A failed read backs off for a minute and leaves the card on the catalogue's own prices — no band, no timeline, and the single `next` line — rather than losing the card.
 
 Because the replay prices past requests at the *current* rate, a scheduled change makes the day's total drift; the card marks a budget-derived remainder as approximate for the same reason.
 

@@ -89,6 +89,8 @@ window.__ModuleLoader__.load({
       'opengateway.discountEnded': '할인이 종료되어 정가 적용 중',
       'opengateway.next': '{when}부터 {prompt}/1M{discount}',
       'opengateway.nextDiscount': ' (−{percent}%)',
+      'opengateway.schedule': '시간별 {slots}',
+      'opengateway.band': '총 입력 {threshold}K 초과 시 {prompt}/{completion} (1M)',
       'opengateway.daily': '오늘',
       'opengateway.weekly': '이번 주',
       'opengateway.monthly': '이번 달',
@@ -173,6 +175,8 @@ window.__ModuleLoader__.load({
       'opengateway.discountEnded': 'Discount ended; list prices apply',
       'opengateway.next': '{prompt}/1M from {when}{discount}',
       'opengateway.nextDiscount': ' (−{percent}%)',
+      'opengateway.schedule': 'By hour: {slots}',
+      'opengateway.band': 'over {threshold}K total input: {prompt}/{completion} per 1M',
       'opengateway.daily': 'Today',
       'opengateway.weekly': 'This week',
       'opengateway.monthly': 'This month',
@@ -274,6 +278,40 @@ window.__ModuleLoader__.load({
     function formatClock(ms) {
       const date = new Date(ms);
       return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
+    }
+
+    /**
+     * The price changes ahead of now, as `{ at, prompt }`.
+     *
+     * A published window says only when it ends, so the price that starts at that
+     * moment is the *following* window's — the list is ordered and the last window
+     * has no successor, which is why it never contributes a change.
+     */
+    function scheduleSlots(timeline, now, limit = 4) {
+      const list = Array.isArray(timeline) ? timeline : [];
+      const slots = [];
+      for (let index = 0; index < list.length - 1 && slots.length < limit; index += 1) {
+        const at = Date.parse(list[index].until ?? '');
+        const prompt = Number(list[index + 1].prompt);
+        if (!Number.isFinite(at) || at <= now || !Number.isFinite(prompt)) continue;
+        slots.push({ at, prompt });
+      }
+      return slots;
+    }
+
+    /**
+     * The strip the card prints: `10:00 ↑$0.210 · 13:00 ↓$0.150 …`.
+     *
+     * Each arrow compares with the window before it, not with the running price,
+     * so a drop after a rise still reads as a drop.
+     */
+    function scheduleStrip(slots, current) {
+      let reference = Number(current);
+      return slots.map((slot) => {
+        const arrow = !Number.isFinite(reference) ? '' : slot.prompt > reference ? '↑' : slot.prompt < reference ? '↓' : '·';
+        reference = slot.prompt;
+        return `${formatClock(slot.at)} ${arrow}${perMillion(slot.prompt)}`;
+      }).join(' · ');
     }
 
     function formatAgo(ms, t) {
@@ -815,7 +853,13 @@ window.__ModuleLoader__.load({
                   completion: perMillion(model.completion),
                 })}`));
               const nextAt = model.nextAt ? Date.parse(model.nextAt) : NaN;
-              if (Number.isFinite(nextAt) && nextAt > now && Number.isFinite(Number(model.nextPrompt))) {
+              // The published schedule beats the catalogue's single "next" slot:
+              // it lists the next few hours, which is what the promo page shows.
+              const slots = scheduleSlots(model.timeline, now);
+              if (slots.length > 0) {
+                body.push(h('div', { className: 'dsh-usage-meta', key: `next-${model.id}` },
+                  t('opengateway.schedule', { slots: scheduleStrip(slots, model.prompt) })));
+              } else if (Number.isFinite(nextAt) && nextAt > now && Number.isFinite(Number(model.nextPrompt))) {
                 body.push(h('div', { className: 'dsh-usage-meta', key: `next-${model.id}` },
                   t('opengateway.next', {
                     prompt: perMillion(model.nextPrompt),
@@ -823,6 +867,14 @@ window.__ModuleLoader__.load({
                     discount: Number.isFinite(Number(model.nextDiscountPercent))
                       ? t('opengateway.nextDiscount', { percent: model.nextDiscountPercent })
                       : '',
+                  })));
+              }
+              if (model.band !== null && Number.isFinite(Number(model.band?.threshold))) {
+                body.push(h('div', { className: 'dsh-usage-meta', key: `band-${model.id}` },
+                  t('opengateway.band', {
+                    threshold: Math.round(Number(model.band.threshold) / 1000),
+                    prompt: perMillion(model.band.prompt),
+                    completion: perMillion(model.band.completion),
                   })));
               }
               const until = model.until ? Date.parse(model.until) : NaN;

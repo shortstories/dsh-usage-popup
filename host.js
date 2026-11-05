@@ -36,13 +36,15 @@ const MONTH_LOOKBACK_MS = 31 * 24 * 60 * 60 * 1000;
 const SEOUL_OFFSET_MS = 9 * 60 * 60 * 1000;
 const DAY_MS = 24 * 60 * 60 * 1000;
 /**
- * OpenGateway's UltraFast models bill uncached input at twice the listed price
- * once a request carries more than 256K total input tokens ("Long-context
- * pricing" in https://opengateway.ai/docs/gateway/ultrafast). Cached input and
- * output are not surcharged, and the public catalogue exposes no band price, so
- * the surcharge is applied here as a multiplier.
+ * A request that carries more than its model's long-context threshold of total
+ * input tokens is billed from that model's band price, and the band price
+ * replaces the running price for the whole request — in, out and cached alike.
+ * The threshold and the band rates are per model and only the price table
+ * (https://opengateway.ai/api/model-prices) publishes them, so the replay counts
+ * crossing tokens against every threshold the catalogue is known to use and
+ * `bucketCost` picks the model's own one when the price table arrives.
  */
-const LONG_CONTEXT_TOKENS = 256_000;
+const BAND_THRESHOLDS = [100_000, 200_000, 256_000, 272_000, 512_000];
 
 /**
  * Provider registry keys → the popup card each one feeds. Gemini is served by
@@ -83,6 +85,11 @@ function settingsOf(raw = {}) {
     openrouterKeyUrl: raw.openrouterKeyUrl || 'https://openrouter.ai/api/v1/key',
     openrouterCreditsUrl: raw.openrouterCreditsUrl || 'https://openrouter.ai/api/v1/credits',
     opengatewayModelsUrl: raw.opengatewayModelsUrl || 'https://apis.opengateway.ai/v1/models',
+    opengatewayPricesUrl: raw.opengatewayPricesUrl || 'https://opengateway.ai/api/model-prices',
+    // That table is a megabyte of unscheduled JSON with `cache-control: no-store`,
+    // and the prices it carries move at the top of an hour, so it is refetched far
+    // less often than the summary around it.
+    opengatewayPricesTtlMs: positive(raw.opengatewayPricesTtlMs, 30 * 60 * 1000),
     opengatewayBudget: budget,
     opengatewayBudgetPeriod: budgetPeriod,
     geminiTimeoutMs: positive(raw.geminiTimeoutMs, 30_000),
@@ -374,7 +381,10 @@ async function collectOpenRouter(ctx, settings) {
  */
 async function collectOpenGatewayPricing(settings) {
   try {
-    const body = await getJson(settings.opengatewayModelsUrl, { headers: { accept: 'application/json' } }, settings);
+    const [body, table] = await Promise.all([
+      getJson(settings.opengatewayModelsUrl, { headers: { accept: 'application/json' } }, settings),
+      collectOpenGatewayPriceTable(settings),
+    ]);
     const models = Array.isArray(body?.data) ? body.data : [];
     const price = {};
     const listed = [];
@@ -385,10 +395,14 @@ async function collectOpenGatewayPricing(settings) {
       const completion = Number(entry.completion);
       if (!Number.isFinite(prompt) || !Number.isFinite(completion)) continue;
       const cacheRead = Number(entry.input_cache_read);
+      // The catalogue prices the running window; the price table adds the band
+      // that replaces those rates above its threshold, and the forward schedule.
+      const enriched = table?.[model.id] ?? null;
       price[model.id] = {
         prompt,
         completion,
         cacheRead: Number.isFinite(cacheRead) ? cacheRead : null,
+        band: enriched?.band ?? null,
       };
       listed.push({
         id: model.id,
@@ -408,6 +422,10 @@ async function collectOpenGatewayPricing(settings) {
         nextDiscountPercent: Number.isFinite(Number(entry.next?.discount_percent))
           ? Number(entry.next.discount_percent)
           : null,
+        band: price[model.id].band,
+        // Every published window ahead of now, oldest first, so the card can list
+        // the day's tariffs instead of only the next change.
+        timeline: enriched?.timeline ?? [],
       });
     }
     return { state: 'ok', price, listed };
@@ -417,13 +435,107 @@ async function collectOpenGatewayPricing(settings) {
 }
 
 /**
+ * The band table and forward schedule, indexed by both ids a model answers to.
+ *
+ * `/api/model-prices` is the table the console and the promo page read. It is a
+ * megabyte that the server neither compresses nor caches, so it lives behind a
+ * module-level cache measured in tens of minutes; a failed read falls back to no
+ * enrichment rather than losing the card, and backs off for a minute so a broken
+ * network is not hammered once per summary.
+ */
+let priceTableCache = { at: 0, value: null };
+
+async function collectOpenGatewayPriceTable(settings) {
+  const now = Date.now();
+  const age = now - priceTableCache.at;
+  const fresh = priceTableCache.value === null ? age < 60_000 : age < settings.opengatewayPricesTtlMs;
+  if (fresh) return priceTableCache.value;
+  try {
+    const body = await getJson(settings.opengatewayPricesUrl, { headers: { accept: 'application/json' } }, settings);
+    const index = {};
+    for (const entry of Object.values(body?.entries ?? {})) {
+      const band = bandOfPriceEntry(entry);
+      const timeline = timelineOfPriceEntry(entry);
+      if (band === null && timeline.length === 0) continue;
+      const value = { band, timeline };
+      if (typeof entry?.modelOwner === 'string' && typeof entry?.modelName === 'string') {
+        // The chat catalogue names a model owner-first; this table is keyed by the
+        // serving provider, so both spellings have to resolve.
+        index[`${entry.modelOwner}/${entry.modelName}`] ??= value;
+      }
+      if (typeof entry?.provider === 'string' && typeof entry?.modelName === 'string') {
+        index[`${entry.provider}/${entry.modelName}`] ??= value;
+      }
+    }
+    priceTableCache = { at: now, value: index };
+    return index;
+  } catch {
+    priceTableCache = { at: now, value: null };
+    return null;
+  }
+}
+
+/** The per-model long-context band, or null when the model has none. */
+function bandOfPriceEntry(entry) {
+  // The band is published twice: once at list price and again inside the running
+  // window at the price actually being charged. The running one is the rate these
+  // tokens are billed at, so it is preferred and the list band is the fallback.
+  return bandFromAxes(entry?.pricing?.current?.effectivePrice?.axisPrices)
+    ?? bandFromAxes(entry?.pricing?.current?.axisPrices)
+    ?? bandFromAxes(entry?.axisPrices);
+}
+
+function bandFromAxes(axes) {
+  if (!axes || typeof axes !== 'object') return null;
+  for (const [key, axis] of Object.entries(axes)) {
+    const threshold = Number(/threshold=(\d+)/.exec(key)?.[1]);
+    const prompt = Number(axis?.input);
+    if (!Number.isFinite(threshold) || !Number.isFinite(prompt)) continue;
+    const completion = Number(axis?.output);
+    const cacheRead = Number(axis?.cacheRead);
+    return {
+      threshold,
+      // The band replaces the running price for the whole request, so a missing
+      // component means "bill it at the running rate" rather than "free".
+      prompt,
+      completion: Number.isFinite(completion) ? completion : null,
+      cacheRead: Number.isFinite(cacheRead) ? cacheRead : null,
+    };
+  }
+  return null;
+}
+
+/** The published windows ahead of now, oldest first. */
+function timelineOfPriceEntry(entry) {
+  const timeline = entry?.pricing?.timeline;
+  if (!Array.isArray(timeline)) return [];
+  const slots = [];
+  for (const slot of timeline) {
+    const rates = slot?.effectivePrice;
+    const prompt = Number(rates?.inputCostPerToken);
+    const until = typeof slot?.until === 'string' ? slot.until : null;
+    if (until === null || !Number.isFinite(prompt)) continue;
+    const completion = Number(rates?.outputCostPerToken);
+    const cacheRead = Number(rates?.cacheReadInputTokenCost);
+    slots.push({
+      until,
+      prompt,
+      completion: Number.isFinite(completion) ? completion : null,
+      cacheRead: Number.isFinite(cacheRead) ? cacheRead : null,
+    });
+  }
+  return slots;
+}
+
+/**
  * Dollars for one replay bucket.
  *
  * DSH's `inputTokens` already excludes cached input (total = input + cacheRead
  * + output), so the three counters map one-to-one onto the three price columns
- * rather than overlapping. `bandInput` holds the uncached input of requests that
- * crossed the long-context threshold; billing those tokens a second time is the
- * same as doubling their price.
+ * rather than overlapping. Requests that crossed their model's long-context
+ * threshold were counted into that threshold's band while replaying; here they
+ * are lifted out of the running rate and billed at the band rate instead, for
+ * all three counters, because the band price covers the whole request.
  */
 function bucketCost(bucket, price) {
   if (!bucket) return null;
@@ -432,9 +544,22 @@ function bucketCost(bucket, price) {
   for (const [model, counts] of Object.entries(bucket.byModel)) {
     const rates = price?.[model];
     if (!rates) continue;
-    usd += (counts.input + (counts.bandInput ?? 0)) * rates.prompt
-      + counts.output * rates.completion
-      + counts.cache * (rates.cacheRead ?? 0);
+    const band = rates.band === null ? null : counts.bands?.[rates.band.threshold] ?? null;
+    const running = band === null
+      ? counts
+      : {
+          input: counts.input - band.input,
+          output: counts.output - band.output,
+          cache: counts.cache - band.cache,
+        };
+    usd += running.input * rates.prompt
+      + running.output * rates.completion
+      + running.cache * (rates.cacheRead ?? 0);
+    if (band !== null) {
+      usd += band.input * (rates.band.prompt ?? rates.prompt)
+        + band.output * (rates.band.completion ?? rates.completion)
+        + band.cache * (rates.band.cacheRead ?? rates.cacheRead ?? 0);
+    }
     priced = true;
   }
   return priced ? usd : null;
@@ -532,20 +657,28 @@ async function collectLocalUsage(settings) {
       const cache = Number(usage.cacheReadTokens) || 0;
       const total = Number(usage.totalTokens) || input + output + cache;
       const model = typeof source?.model === 'string' ? source.model : 'unknown';
-      // Uncached input is what a long-context request re-bills at double rate.
-      const bandInput = input + cache > LONG_CONTEXT_TOKENS ? input : 0;
+      const span = input + cache;
       const add = (target) => {
         target.requests += 1;
         target.input += input;
         target.output += output;
         target.cache += cache;
         target.total += total;
-        const entry = (target.byModel[model] ??= { requests: 0, input: 0, output: 0, cache: 0, bandInput: 0 });
+        const entry = (target.byModel[model] ??= { requests: 0, input: 0, output: 0, cache: 0, bands: {} });
         entry.requests += 1;
         entry.input += input;
         entry.output += output;
         entry.cache += cache;
-        entry.bandInput += bandInput;
+        // Count the request into every band it crosses. Which one actually prices
+        // it depends on its model, and that is only known once the price table
+        // lands, so the whole ladder is kept.
+        for (const threshold of BAND_THRESHOLDS) {
+          if (span <= threshold) break;
+          const band = (entry.bands[threshold] ??= { input: 0, output: 0, cache: 0 });
+          band.input += input;
+          band.output += output;
+          band.cache += cache;
+        }
       };
       add(bucket.week);
       if (time >= todayStart) add(bucket.today);
@@ -742,6 +875,9 @@ export const internals = {
   collectGemini,
   collectOpenRouter,
   collectOpenGatewayPricing,
+  collectOpenGatewayPriceTable,
+  bandOfPriceEntry,
+  timelineOfPriceEntry,
   openGatewayCard,
   bucketCost,
   parseGeminiUsage,
