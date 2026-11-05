@@ -21,12 +21,13 @@ window.__ModuleLoader__.load({
       'gemini-web': 'gemini',
       'deepseek-official': 'deepseek',
       'openrouter-preset': 'openrouter',
+      opengateway: 'opengateway',
     };
 
     //#region texts
     const ko = {
       'panel.title': '사용량 · 남은 한도',
-      'panel.subtitle': 'Codex·Gemini·DeepSeek·OpenRouter의 남은 한도와 이 Harness의 사용량',
+      'panel.subtitle': 'Codex·Gemini·DeepSeek·OpenRouter·OpenGateway의 남은 한도와 이 Harness의 사용량',
       'panel.loading': '불러오는 중…',
       'panel.retry': '다시 시도',
       'panel.refresh': '새로고침',
@@ -76,6 +77,19 @@ window.__ModuleLoader__.load({
       'openrouter.freeTier': '무료 티어',
       'openrouter.weekly': '주간',
       'openrouter.daily': '오늘',
+      'opengateway.name': 'OpenGateway',
+      'opengateway.spent': '오늘 {amount}',
+      'opengateway.spentWeek': '이번 주 {amount}',
+      'opengateway.spentMonth': '이번 달 {amount}',
+      'opengateway.remaining': '남음 {amount}',
+      'opengateway.budgetNotice': '설정된 예산 {amount} 기준 (근사치)',
+      'opengateway.noBudget': '잔액 API가 없어 지출만 표시합니다',
+      'opengateway.price': '{prompt} / {completion} (1M 토큰)',
+      'opengateway.discount': '{percent}% 할인, {when} 종료',
+      'opengateway.discountEnded': '할인이 종료되어 정가 적용 중',
+      'opengateway.daily': '오늘',
+      'opengateway.weekly': '이번 주',
+      'opengateway.monthly': '이번 달',
       'session.model': '모델',
       'session.remaining': '남은 한도',
       'session.noBudget': '한도 정보 없음',
@@ -94,7 +108,7 @@ window.__ModuleLoader__.load({
     };
     const en = {
       'panel.title': 'Usage and remaining limits',
-      'panel.subtitle': 'Remaining Codex, Gemini, DeepSeek and OpenRouter limits plus this Harness’s own usage',
+      'panel.subtitle': 'Remaining Codex, Gemini, DeepSeek, OpenRouter and OpenGateway limits plus this Harness’s own usage',
       'panel.loading': 'Loading…',
       'panel.retry': 'Retry',
       'panel.refresh': 'Refresh',
@@ -144,6 +158,19 @@ window.__ModuleLoader__.load({
       'openrouter.freeTier': 'Free tier',
       'openrouter.weekly': 'Weekly',
       'openrouter.daily': 'Today',
+      'opengateway.name': 'OpenGateway',
+      'opengateway.spent': '{amount} today',
+      'opengateway.spentWeek': '{amount} this week',
+      'opengateway.spentMonth': '{amount} this month',
+      'opengateway.remaining': '{amount} left',
+      'opengateway.budgetNotice': 'Against a configured budget of {amount} (approximate)',
+      'opengateway.noBudget': 'OpenGateway publishes no balance API, so this shows spend only',
+      'opengateway.price': '{prompt} / {completion} per 1M tokens',
+      'opengateway.discount': '{percent}% off, ends in {when}',
+      'opengateway.discountEnded': 'Discount ended; list prices apply',
+      'opengateway.daily': 'Today',
+      'opengateway.weekly': 'This week',
+      'opengateway.monthly': 'This month',
       'session.model': 'Model',
       'session.remaining': 'remaining',
       'session.noBudget': 'no budget data',
@@ -597,6 +624,20 @@ window.__ModuleLoader__.load({
             if (budget === null) return null;
             return { percent: (budget.remaining / budget.limit) * 100, label: money(budget.remaining) };
           }
+          if (provider === 'opengateway') {
+            // OpenGateway reports nothing to draw a ceiling against, so without a
+            // configured budget the bar stays idle and the label carries today's
+            // spend — the one number the API makes knowable.
+            const budget = card.budget ?? null;
+            const spent = Number(card.today?.usd);
+            if (budget !== null && Number(budget.amount) > 0) {
+              const amount = Number(budget.amount);
+              const remaining = Math.max(0, Number(budget.remaining));
+              return { percent: (remaining / amount) * 100, label: spendMoney(remaining) };
+            }
+            if (!Number.isFinite(spent)) return null;
+            return { percent: null, label: spendMoney(spent) };
+          }
           return null;
         }
 
@@ -665,6 +706,127 @@ window.__ModuleLoader__.load({
           );
         }
 
+        /** A per-token rate as a per-million price, which is how prices are read. */
+        function perMillion(rate) {
+          const n = Number(rate);
+          if (!Number.isFinite(n)) return '—';
+          const per = n * 1e6;
+          return `$${per >= 1 ? per.toFixed(2) : per.toFixed(3)}`;
+        }
+
+        /** Dollars at a scale where a cent of spend is still visible. */
+        function spendMoney(value) {
+          const n = Number(value);
+          if (!Number.isFinite(n)) return '—';
+          if (n === 0) return '$0.00';
+          return `$${n < 1 ? n.toFixed(3) : n.toFixed(2)}`;
+        }
+
+        /**
+         * The OpenGateway card.
+         *
+         * OpenGateway has no balance endpoint for an inference key, so unlike
+         * OpenRouter there is no provider-reported remainder to draw. The Host
+         * prices this home's own token counts against the public catalogue
+         * instead, which is why the card leads with spend and only shows a bar
+         * when a budget was configured to measure the spend against.
+         */
+        function OpenGatewayCard({ opengateway, now }) {
+          const ok = opengateway.state === 'ok';
+          const body = [];
+          const badges = [];
+          const models = Array.isArray(opengateway.models) ? opengateway.models : [];
+
+          // The discount window is the one part of this card that is not derived
+          // from local logs, so surface it: prices change when it ends.
+          const discounted = models.find((model) => {
+            const until = model.until ? Date.parse(model.until) : NaN;
+            return Number.isFinite(Number(model.discountPercent)) && Number(until) > now;
+          });
+          if (discounted) {
+            badges.push(h('span', { className: 'dsh-usage-badge', 'data-tone': 'good', key: 'discount' },
+              `−${discounted.discountPercent}%`));
+          }
+
+          if (ok) {
+            const budget = opengateway.budget ?? null;
+            if (budget !== null && Number(budget.amount) > 0) {
+              const amount = Number(budget.amount);
+              const remaining = Math.max(0, Number(budget.remaining));
+              const percent = Math.max(0, Math.min(100, (remaining / amount) * 100));
+              const tone = percent <= 10 ? 'bad' : percent <= 30 ? 'warn' : 'ok';
+              const period = budget.period === 'daily'
+                ? t('opengateway.daily')
+                : budget.period === 'weekly' ? t('opengateway.weekly') : t('opengateway.monthly');
+              body.push(h(
+                'div',
+                { className: 'dsh-usage-meter', key: 'meter' },
+                h('span', { className: 'dsh-usage-meter-label' }, period),
+                h('div', { className: 'dsh-usage-bar' }, h('span', {
+                  className: 'dsh-usage-fill',
+                  'data-tone': tone,
+                  style: { width: `${percent}%` },
+                })),
+                h('span', { className: 'dsh-usage-meter-value' },
+                  t('opengateway.remaining', { amount: spendMoney(remaining) })),
+              ));
+              body.push(h('div', { className: 'dsh-usage-meter-note', key: 'budget' },
+                t('opengateway.budgetNotice', { amount: spendMoney(amount) })));
+            }
+
+            const todayUsd = Number(opengateway.today?.usd);
+            const weekUsd = Number(opengateway.week?.usd);
+            const monthUsd = Number(opengateway.month?.usd);
+            if (Number.isFinite(todayUsd)) {
+              body.push(h('div', { className: 'dsh-usage-row', key: 'spend' },
+                h('span', { className: 'dsh-usage-row-label' },
+                  t('opengateway.spent', { amount: spendMoney(todayUsd) })),
+                Number.isFinite(weekUsd) && weekUsd !== todayUsd
+                  ? h('span', { className: 'dsh-usage-row-value' },
+                    t('opengateway.spentWeek', { amount: spendMoney(weekUsd) }))
+                  : null));
+            }
+            if (Number.isFinite(monthUsd) && monthUsd !== weekUsd) {
+              body.push(h('div', { className: 'dsh-usage-meta', key: 'month' },
+                t('opengateway.spentMonth', { amount: spendMoney(monthUsd) })));
+            }
+            if (budget === null) {
+              body.push(h('div', { className: 'dsh-usage-meta', key: 'nobudget' }, t('opengateway.noBudget')));
+            }
+
+            for (const model of models) {
+              body.push(h('div', { className: 'dsh-usage-meta', key: `price-${model.id}` },
+                `${model.id} · ${t('opengateway.price', {
+                  prompt: perMillion(model.prompt),
+                  completion: perMillion(model.completion),
+                })}`));
+              const until = model.until ? Date.parse(model.until) : NaN;
+              if (Number.isFinite(Number(model.discountPercent))) {
+                body.push(h('div', { className: 'dsh-usage-meta', key: `discount-${model.id}` },
+                  Number(until) > now
+                    ? t('opengateway.discount', {
+                      percent: model.discountPercent,
+                      when: formatWhen(until - now, t),
+                    })
+                    : t('opengateway.discountEnded')));
+              }
+            }
+          } else {
+            body.push(h('div', { className: 'dsh-usage-meta', key: 'error' },
+              errorText(opengateway.code ?? 'unreachable')));
+          }
+
+          return h(
+            'article',
+            { className: 'dsh-usage-item' },
+            h('div', { className: 'dsh-usage-item-head' },
+              h('span', { className: 'dsh-usage-name' }, t('opengateway.name')),
+              ...badges),
+            ...body,
+            localLine(opengateway.local),
+          );
+        }
+
         function UsagePanel() {
           const snapshot = useSnapshot();
 
@@ -701,7 +863,8 @@ window.__ModuleLoader__.load({
               h(CodexCard, { codex: data.codex ?? {}, now }),
               h(GeminiCard, { gemini: data.gemini ?? {} }),
               h(DeepSeekCard, { deepseek: data.deepseek ?? {} }),
-              h(OpenRouterCard, { openrouter: data.openrouter ?? {}, now }));
+              h(OpenRouterCard, { openrouter: data.openrouter ?? {}, now }),
+              h(OpenGatewayCard, { opengateway: data.opengateway ?? {}, now }));
           }
 
           return h(
@@ -734,6 +897,20 @@ window.__ModuleLoader__.load({
          * session store and DocumentTitle resolve it the same way, because no
          * public "current session" accessor exists for a root-scope slot.
          */
+        /**
+         * A model id trimmed for a narrow sidebar row. `deepseek/deepseek-v4.1-
+         * flash-ultrafast` spends half its width repeating the vendor, so drop the
+         * prefix when the name already starts with it.
+         */
+        function shortModel(id) {
+          if (typeof id !== 'string' || id === '') return null;
+          const slash = id.lastIndexOf('/');
+          if (slash <= 0 || slash === id.length - 1) return id;
+          const head = id.slice(0, slash);
+          const tail = id.slice(slash + 1);
+          return tail.startsWith(head) ? tail : id;
+        }
+
         function useCurrentSessionId(useSessions) {
           return useSessions((state) => {
             for (const id of state.ids) {
@@ -808,7 +985,7 @@ window.__ModuleLoader__.load({
             },
             h('div', { className: 'dsh-usage-side-head' },
               h('span', { className: 'dsh-usage-side-dot', 'data-tone': running ? 'live' : 'idle' }),
-              h('span', { className: 'dsh-usage-side-model' }, model?.model ?? t('session.none')),
+              h('span', { className: 'dsh-usage-side-model' }, shortModel(model?.model) ?? t('session.none')),
               h('span', { className: 'dsh-usage-side-meta' }, label)),
             h('div', { className: 'dsh-usage-side-bar' },
               h('span', {

@@ -8,7 +8,11 @@
  *  - Gemini Web: the proxy's health document for liveness and the signed-in
  *    browser's own https://gemini.google.com/usage page for the two limits.
  *  - DeepSeek: the platform balance for the configured API key.
- *  - All three: token and request counts replayed from this Harness home's own
+ *  - OpenRouter: the key's own budget document plus the account credits behind it.
+ *  - OpenGateway: the public model catalogue, whose per-token prices turn this
+ *    home's own token counts into money. OpenGateway publishes no balance
+ *    endpoint, so a remaining figure needs a configured budget (see below).
+ *  - All of them: token and request counts replayed from this Harness home's own
  *    session logs, so "usage" means the same thing for every provider.
  */
 import { readFile, readdir, stat } from 'node:fs/promises';
@@ -26,6 +30,8 @@ const JSON_HEADERS = {
 const DEFAULT_CACHE_TTL_MS = 20_000;
 /** How far back the local replay reads session logs. */
 const DEFAULT_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1000;
+/** The window a monthly budget needs; only requested when one is configured. */
+const MONTH_LOOKBACK_MS = 31 * 24 * 60 * 60 * 1000;
 /** Fixed offset of Asia/Seoul, the account's wall clock; no DST there. */
 const SEOUL_OFFSET_MS = 9 * 60 * 60 * 1000;
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -39,6 +45,7 @@ const TRACKED = {
   'gemini-web': 'gemini',
   'deepseek-official': 'deepseek',
   'openrouter-preset': 'openrouter',
+  opengateway: 'opengateway',
 };
 
 const unzip = promisify(zstdDecompress);
@@ -46,6 +53,15 @@ const unzip = promisify(zstdDecompress);
 function settingsOf(raw = {}) {
   const home = raw.dshHome || process.env.DSH_HOME || '~/.dsh';
   const positive = (value, fallback) => (Number.isFinite(value) && value > 0 ? value : fallback);
+  const period = raw.opengatewayBudgetPeriod;
+  // A monthly budget needs a month of history to be meaningful, and the replay
+  // is the expensive half of this route, so widen the window only when asked.
+  const budgetPeriod = ['daily', 'weekly', 'monthly'].includes(period) ? period : 'monthly';
+  const budget = positive(raw.opengatewayBudget, null);
+  const baseLookback = positive(raw.lookbackMs, DEFAULT_LOOKBACK_MS);
+  const lookbackMs = budget !== null && budgetPeriod === 'monthly'
+    ? Math.max(baseLookback, MONTH_LOOKBACK_MS)
+    : baseLookback;
   return {
     codexCredentialPath: raw.codexCredentialPath || join(home, 'subscriptions', 'codex-oauth.json'),
     sessionsRoot: raw.sessionsRoot || join(home, 'sessions'),
@@ -58,10 +74,13 @@ function settingsOf(raw = {}) {
     openrouterKeyRef: raw.openrouterKeyRef || 'OPENROUTER_PRESET_API_KEY',
     openrouterKeyUrl: raw.openrouterKeyUrl || 'https://openrouter.ai/api/v1/key',
     openrouterCreditsUrl: raw.openrouterCreditsUrl || 'https://openrouter.ai/api/v1/credits',
+    opengatewayModelsUrl: raw.opengatewayModelsUrl || 'https://apis.opengateway.ai/v1/models',
+    opengatewayBudget: budget,
+    opengatewayBudgetPeriod: budgetPeriod,
     geminiTimeoutMs: positive(raw.geminiTimeoutMs, 30_000),
     requestTimeoutMs: positive(raw.requestTimeoutMs, 9_000),
     cacheTtlMs: positive(raw.cacheTtlMs, DEFAULT_CACHE_TTL_MS),
-    lookbackMs: positive(raw.lookbackMs, DEFAULT_LOOKBACK_MS),
+    lookbackMs,
   };
 }
 
@@ -336,6 +355,72 @@ async function collectOpenRouter(ctx, settings) {
   }
 }
 
+/**
+ * Per-token prices from the public model catalogue.
+ *
+ * `GET /v1/models` needs no credentials, and its `pricing` block is quoted per
+ * token after the time-based discount that is currently running, so it is the
+ * only honest way to price this home's own token counts. The catalogue also
+ * carries the scheduled change, which the card shows as a countdown when it is
+ * close enough to matter.
+ */
+async function collectOpenGatewayPricing(settings) {
+  try {
+    const body = await getJson(settings.opengatewayModelsUrl, { headers: { accept: 'application/json' } }, settings);
+    const models = Array.isArray(body?.data) ? body.data : [];
+    const price = {};
+    const listed = [];
+    for (const model of models) {
+      const entry = model?.pricing;
+      if (!model?.id || !entry) continue;
+      const prompt = Number(entry.prompt);
+      const completion = Number(entry.completion);
+      if (!Number.isFinite(prompt) || !Number.isFinite(completion)) continue;
+      const cacheRead = Number(entry.input_cache_read);
+      price[model.id] = {
+        prompt,
+        completion,
+        cacheRead: Number.isFinite(cacheRead) ? cacheRead : null,
+      };
+      listed.push({
+        id: model.id,
+        prompt,
+        completion,
+        cacheRead: price[model.id].cacheRead,
+        discountPercent: Number.isFinite(Number(entry.discount_percent)) ? Number(entry.discount_percent) : null,
+        // When the running discount ends; the card counts down to it because the
+        // same tokens cost more afterwards.
+        until: typeof entry.until === 'string' ? entry.until : null,
+      });
+    }
+    return { state: 'ok', price, listed };
+  } catch (error) {
+    return { state: 'error', code: failureCode(error), price: {}, listed: [] };
+  }
+}
+
+/**
+ * Dollars for one replay bucket.
+ *
+ * DSH's `inputTokens` already excludes cached input (total = input + cacheRead
+ * + output), so the three counters map one-to-one onto the three price columns
+ * rather than overlapping.
+ */
+function bucketCost(bucket, price) {
+  if (!bucket) return null;
+  let usd = 0;
+  let priced = false;
+  for (const [model, counts] of Object.entries(bucket.byModel)) {
+    const rates = price?.[model];
+    if (!rates) continue;
+    usd += counts.input * rates.prompt
+      + counts.output * rates.completion
+      + counts.cache * (rates.cacheRead ?? 0);
+    priced = true;
+  }
+  return priced ? usd : null;
+}
+
 async function listSessionLogs(root, since) {
   const found = [];
   const walk = async (dir, depth) => {
@@ -371,24 +456,35 @@ async function listSessionLogs(root, since) {
 }
 
 function emptyBucket() {
-  return { requests: 0, input: 0, output: 0, total: 0 };
+  // `byModel` is what makes a dollar figure possible: the three counters are
+  // priced at rates that differ per model, so the totals alone cannot be
+  // multiplied by one price without lying.
+  return { requests: 0, input: 0, output: 0, total: 0, cache: 0, byModel: {} };
 }
 
 /**
  * Replays assistant-message usage out of this home's own session logs. Only
  * messages stamped inside the lookback window are read, and the totals are
- * split into today and the trailing week per provider.
+ * split into today, the trailing week, and (when the window reaches back far
+ * enough) the trailing month, per provider and per model.
  */
 async function collectLocalUsage(settings) {
   const now = Date.now();
   const todayStart = startOfToday(now);
   const weekStart = todayStart - 6 * DAY_MS;
+  const monthStart = todayStart - 29 * DAY_MS;
+  // The replay window follows the configured lookback, so a monthly budget sees
+  // a month while the common case still reads only a week of logs.
+  const windowStart = Math.min(weekStart, todayStart - (settings.lookbackMs - DAY_MS));
+  const withMonth = windowStart <= monthStart;
   const local = {};
   for (const provider of Object.keys(TRACKED)) {
-    local[provider] = { today: emptyBucket(), week: emptyBucket() };
+    const buckets = { today: emptyBucket(), week: emptyBucket() };
+    if (withMonth) buckets.month = emptyBucket();
+    local[provider] = buckets;
   }
 
-  const files = await listSessionLogs(settings.sessionsRoot, weekStart);
+  const files = await listSessionLogs(settings.sessionsRoot, windowStart);
   for (const file of files) {
     let text;
     try {
@@ -405,25 +501,33 @@ async function collectLocalUsage(settings) {
         continue;
       }
       if (event?.type !== 'assistant/message') continue;
-      const provider = event.data?.message?.source?.provider;
+      const source = event.data?.message?.source;
+      const provider = source?.provider;
       const bucket = local[provider];
       if (bucket === undefined) continue;
       const time = Number(event.time);
-      if (!Number.isFinite(time) || time < weekStart) continue;
+      if (!Number.isFinite(time) || time < windowStart) continue;
       const usage = event.data?.usage ?? {};
       const input = Number(usage.inputTokens) || 0;
       const output = Number(usage.outputTokens) || 0;
-      const total = Number(usage.totalTokens) || input + output;
-      bucket.week.requests += 1;
-      bucket.week.input += input;
-      bucket.week.output += output;
-      bucket.week.total += total;
-      if (time >= todayStart) {
-        bucket.today.requests += 1;
-        bucket.today.input += input;
-        bucket.today.output += output;
-        bucket.today.total += total;
-      }
+      const cache = Number(usage.cacheReadTokens) || 0;
+      const total = Number(usage.totalTokens) || input + output + cache;
+      const model = typeof source?.model === 'string' ? source.model : 'unknown';
+      const add = (target) => {
+        target.requests += 1;
+        target.input += input;
+        target.output += output;
+        target.cache += cache;
+        target.total += total;
+        const entry = (target.byModel[model] ??= { requests: 0, input: 0, output: 0, cache: 0 });
+        entry.requests += 1;
+        entry.input += input;
+        entry.output += output;
+        entry.cache += cache;
+      };
+      add(bucket.week);
+      if (time >= todayStart) add(bucket.today);
+      if (bucket.month !== undefined && time >= monthStart) add(bucket.month);
     }
   }
 
@@ -431,7 +535,7 @@ async function collectLocalUsage(settings) {
   for (const [provider, card] of Object.entries(TRACKED)) {
     byCard[card] = local[provider];
   }
-  return { todayStart, weekStart, byCard };
+  return { todayStart, weekStart, monthStart, withMonth, byCard };
 }
 
 async function settle(promise) {
@@ -442,8 +546,70 @@ async function settle(promise) {
   }
 }
 
+/**
+ * The OpenGateway card.
+ *
+ * OpenGateway exposes no balance or quota endpoint to an inference key — its
+ * console reads the team quota through a control-plane route that requires a
+ * Clerk session, so the number simply is not available here. What IS available
+ * is the price list (public) and this home's own token counts, so the card
+ * reports money spent, and reports a remaining figure only when a budget was
+ * configured to measure it against.
+ */
+function openGatewayCard(pricing, replay, settings) {
+  const bucketOf = (name) => replay?.['opengateway']?.[name] ?? null;
+  const decorate = (bucket) => {
+    if (bucket === null) return null;
+    return { ...bucket, usd: bucketCost(bucket, pricing.price) };
+  };
+  const today = decorate(bucketOf('today'));
+  const week = decorate(bucketOf('week'));
+  const month = decorate(bucketOf('month'));
+
+  let budget = null;
+  if (settings.opengatewayBudget !== null) {
+    const period = settings.opengatewayBudgetPeriod;
+    const spent = (period === 'daily' ? today : period === 'weekly' ? week : month)?.usd;
+    if (typeof spent === 'number') {
+      budget = {
+        amount: settings.opengatewayBudget,
+        period,
+        spent,
+        remaining: Math.max(0, settings.opengatewayBudget - spent),
+        // The replay prices past requests at today's rates, so the figure drifts
+        // when a scheduled discount changes; the card says so rather than
+        // pretending the dollars are exact.
+        approximate: true,
+      };
+    }
+  }
+
+  // Only the models this home actually used: the public catalogue lists a
+  // hundred more, and shipping them all would dwarf the rest of the summary.
+  const used = new Set();
+  for (const bucket of [today, week, month]) {
+    for (const model of Object.keys(bucket?.byModel ?? {})) used.add(model);
+  }
+  const models = pricing.listed.filter((entry) => used.has(entry.id));
+
+  const state = pricing.state === 'ok' ? 'ok' : pricing.state;
+  return {
+    state,
+    code: pricing.code ?? null,
+    today,
+    week,
+    month,
+    budget,
+    models,
+    // Same shape the other cards carry: the replay buckets, so the card can show
+    // request and token counts beside the money they cost.
+    local: replay?.['opengateway'] ?? null,
+  };
+}
+
 async function buildSummary(ctx, settings, fresh = false) {
-  const [local, codex, gemini, deepseek, openrouter] = await Promise.all([
+  const [pricing, local, codex, gemini, deepseek, openrouter] = await Promise.all([
+    settle(collectOpenGatewayPricing(settings)),
     settle(collectLocalUsage(settings)),
     settle(collectCodex(settings)),
     settle(collectGemini(settings, fresh)),
@@ -457,6 +623,8 @@ async function buildSummary(ctx, settings, fresh = false) {
     return { ...body, local: replay?.[card] ?? null };
   };
 
+  const priceBody = pricing.ok ? pricing.value : { state: 'error', code: 'unreachable', price: {}, listed: [] };
+
   return {
     generatedAt: Date.now(),
     timeZone: 'Asia/Seoul',
@@ -464,6 +632,7 @@ async function buildSummary(ctx, settings, fresh = false) {
     gemini: attach('gemini', gemini),
     deepseek: attach('deepseek', deepseek),
     openrouter: attach('openrouter', openrouter),
+    opengateway: openGatewayCard(priceBody, replay, settings),
   };
 }
 
@@ -550,6 +719,9 @@ export const internals = {
   collectLocalUsage,
   collectGemini,
   collectOpenRouter,
+  collectOpenGatewayPricing,
+  openGatewayCard,
+  bucketCost,
   parseGeminiUsage,
   buildSummary,
   createHandler,
