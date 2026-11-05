@@ -92,6 +92,12 @@ So the card does the honest thing instead: it replays this home's own token coun
 
 UltraFast models bill uncached input at **twice** the listed input price once a request carries more than 256K total input tokens; cached input and output are not surcharged. The public catalogue carries no band price, so the replay applies the multiplier itself: uncached input from requests past the threshold is billed a second time (`LONG_CONTEXT_TOKENS` in `host.js`, documented as 256K). Requests below the threshold, cached tokens and output are untouched.
 
+### Scheduled prices
+
+UltraFast prices are not fixed: the catalogue publishes a moving discount window (`discount_percent` with `until`) and the next slot after it (`next`), and the docs describe them as time-based prices that appear as a `−N% NOW` badge plus a next-change line. Two models are on a schedule today — `deepseek/deepseek-v4.1-flash-ultrafast` and `z-ai/glm-5.3-flash-ultrafast` — and both change at fixed hours, so the same tokens can cost more than twice as much a few hours later. The card therefore shows the rate now, the countdown to the change, and the **next** rate with the hour it starts; models on a static price (`source: LIST` or `MODEL_PERCENT`) simply have no countdown or next line.
+
+Because the replay prices past requests at the *current* rate, a scheduled change makes the day's total drift; the card marks a budget-derived remainder as approximate for the same reason.
+
 ## Requirements
 
 - DSH with the Web profile (`dsh web`) and the `@deepseek-ai/dsh-client-ui-settings-models` package (the Models page).

@@ -399,6 +399,15 @@ async function collectOpenGatewayPricing(settings) {
         // When the running discount ends; the card counts down to it because the
         // same tokens cost more afterwards.
         until: typeof entry.until === 'string' ? entry.until : null,
+        // The next scheduled slot, when the catalogue publishes one. UltraFast
+        // prices move in fixed windows, so the next rate says what the same work
+        // will cost a few hours from now.
+        nextAt: typeof entry.next?.at === 'string' ? entry.next.at : null,
+        nextPrompt: Number.isFinite(Number(entry.next?.prompt)) ? Number(entry.next.prompt) : null,
+        nextCompletion: Number.isFinite(Number(entry.next?.completion)) ? Number(entry.next.completion) : null,
+        nextDiscountPercent: Number.isFinite(Number(entry.next?.discount_percent))
+          ? Number(entry.next.discount_percent)
+          : null,
       });
     }
     return { state: 'ok', price, listed };

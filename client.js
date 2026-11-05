@@ -87,6 +87,8 @@ window.__ModuleLoader__.load({
       'opengateway.price': '{prompt} / {completion} (1M 토큰)',
       'opengateway.discount': '{percent}% 할인, {when} 종료',
       'opengateway.discountEnded': '할인이 종료되어 정가 적용 중',
+      'opengateway.next': '{when}부터 {prompt}/1M{discount}',
+      'opengateway.nextDiscount': ' (−{percent}%)',
       'opengateway.daily': '오늘',
       'opengateway.weekly': '이번 주',
       'opengateway.monthly': '이번 달',
@@ -169,6 +171,8 @@ window.__ModuleLoader__.load({
       'opengateway.price': '{prompt} / {completion} per 1M tokens',
       'opengateway.discount': '{percent}% off, ends in {when}',
       'opengateway.discountEnded': 'Discount ended; list prices apply',
+      'opengateway.next': '{prompt}/1M from {when}{discount}',
+      'opengateway.nextDiscount': ' (−{percent}%)',
       'opengateway.daily': 'Today',
       'opengateway.weekly': 'This week',
       'opengateway.monthly': 'This month',
@@ -264,6 +268,12 @@ window.__ModuleLoader__.load({
       if (days > 0) return `${days}d ${hours}h`;
       if (hours > 0) return `${hours}h ${rest}m`;
       return `${Math.max(1, rest)}m`;
+    }
+
+    /** A wall-clock time in the reader's own zone, to the minute. */
+    function formatClock(ms) {
+      const date = new Date(ms);
+      return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
     }
 
     function formatAgo(ms, t) {
@@ -804,6 +814,17 @@ window.__ModuleLoader__.load({
                   prompt: perMillion(model.prompt),
                   completion: perMillion(model.completion),
                 })}`));
+              const nextAt = model.nextAt ? Date.parse(model.nextAt) : NaN;
+              if (Number.isFinite(nextAt) && nextAt > now && Number.isFinite(Number(model.nextPrompt))) {
+                body.push(h('div', { className: 'dsh-usage-meta', key: `next-${model.id}` },
+                  t('opengateway.next', {
+                    prompt: perMillion(model.nextPrompt),
+                    when: formatClock(nextAt),
+                    discount: Number.isFinite(Number(model.nextDiscountPercent))
+                      ? t('opengateway.nextDiscount', { percent: model.nextDiscountPercent })
+                      : '',
+                  })));
+              }
               const until = model.until ? Date.parse(model.until) : NaN;
               if (Number.isFinite(Number(model.discountPercent))) {
                 body.push(h('div', { className: 'dsh-usage-meta', key: `discount-${model.id}` },
